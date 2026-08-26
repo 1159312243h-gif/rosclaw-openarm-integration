@@ -1,0 +1,144 @@
+# Skydio X2 Benchmark Configuration — Physical DNA Benchmark Layer
+# For Darwin / EEIB evaluation and regression testing
+
+benchmark_version: "1.0"
+robot_id: skydio_x2
+
+# ── Flight Performance Benchmarks ──
+flight_benchmarks:
+  - name: hover_stability
+    description: "Position hold accuracy in hover"
+    target: 0.1
+    unit: m
+    duration: 60.0
+  - name: max_horizontal_speed
+    description: "Maximum achievable horizontal speed"
+    target: 25.0
+    unit: m/s
+  - name: max_climb_rate
+    description: "Maximum vertical climb rate"
+    target: 8.0
+    unit: m/s
+  - name: flight_time
+    description: "Total flight time on full battery"
+    target: 2100.0
+    unit: s
+  - name: wind_tolerance
+    description: "Maximum wind speed for stable flight"
+    target: 12.0
+    unit: m/s
+
+# ── Navigation Benchmarks ──
+navigation_benchmarks:
+  - name: waypoint_accuracy
+    description: "GPS waypoint navigation accuracy"
+    target: 1.0
+    unit: m
+  - name: rtl_accuracy
+    description: "Return-to-launch landing accuracy"
+    target: 2.0
+    unit: m
+  - name: obstacle_avoidance_reaction_time
+    description: "Time to react to detected obstacle"
+    target: 0.1
+    unit: s
+
+# ── Perception Benchmarks ──
+perception_benchmarks:
+  - name: object_detection_accuracy
+    description: "Object detection mAP on aerial dataset"
+    target: 0.85
+  - name: object_tracking_iou
+    description: "Tracking IoU over time"
+    target: 0.75
+  - name: depth_estimation_rmse
+    description: "Stereo depth estimation RMSE"
+    target: 0.5
+    unit: m
+
+# ── Simulation Benchmarks ──
+simulation_benchmarks:
+  mujoco:
+    - name: real_time_factor
+      target: 1.0
+      tolerance: 0.05
+    - name: aerodynamic_stability
+      description: "Stable hover without drift in 60s simulation"
+      target: true
+    - name: rotor_dynamics_accuracy
+      description: "Thrust response matches physical model"
+      target: 0.95
+
+  isaac:
+    - name: real_time_factor
+      target: 1.0
+      tolerance: 0.1
+    - name: gpu_physics_speedup
+      target: 20.0
+      description: "Speedup vs CPU physics for 1000 parallel envs"
+
+# ── Task Benchmarks (Darwin-style) ──
+task_benchmarks:
+  - name: area_survey_1km2
+    description: "Survey 1 square kilometer area"
+    tasks:
+      - aerial_surveillance
+    metrics:
+      - name: coverage_percent
+        target: 0.95
+      - name: flight_time
+        target: 1800.0
+        unit: s
+      - name: collision_count
+        target: 0
+
+  - name: waypoint_mission_10
+    description: "Navigate through 10 waypoints"
+    tasks:
+      - waypoint_navigation
+    metrics:
+      - name: success_rate
+        target: 0.98
+      - name: position_error
+        target: 2.0
+        unit: m
+      - name: completion_time
+        target: 300.0
+        unit: s
+
+  - name: object_track_60s
+    description: "Track a moving object for 60 seconds"
+    tasks:
+      - object_tracking
+    metrics:
+      - name: tracking_duration
+        target: 60.0
+        unit: s
+      - name: tracking_iou
+        target: 0.75
+      - name: lost_lock_count
+        target: 0
+
+# ── Safety Benchmarks ──
+safety_benchmarks:
+  - name: geofence_response_time
+    description: "Time to react to geofence breach"
+    target: 0.5
+    unit: s
+  - name: rtl_landing_accuracy
+    description: "Return-to-launch landing position error"
+    target: 2.0
+    unit: m
+  - name: obstacle_avoidance_success
+    description: "Success rate avoiding unexpected obstacles"
+    target: 0.99
+
+# ── Baseline Hardware ──
+baseline_hardware:
+  cpu: "Intel i7-12700"
+  gpu: "NVIDIA RTX 3080"
+  ram: "32GB DDR4"
+  os: "Ubuntu 22.04"
+  ros_distro: "humble"
+  realtime_kernel: false
+  flight_controller: "skydio_autonomy_sim"

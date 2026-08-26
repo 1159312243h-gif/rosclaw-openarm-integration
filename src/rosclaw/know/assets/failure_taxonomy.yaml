@@ -1,0 +1,108 @@
+# ROSClaw Failure Taxonomy v1.0
+# Standardized classification of physical execution failures.
+
+failure_taxonomy:
+  version: "1.0.0"
+  categories:
+    - id: grasp
+      name: "Grasp Failure"
+      description: "End-effector failed to acquire or retain object."
+      modes:
+        - missed_grasp
+        - slip_during_lift
+        - insufficient_force
+        - wrong_grip_pose
+        - object_deformation
+
+    - id: collision
+      name: "Collision"
+      description: "Unplanned contact with environment or self."
+      modes:
+        - self_collision
+        - obstacle_collision
+        - human_collision
+        - table_contact
+        - unexpected_contact
+
+    - id: workspace
+      name: "Workspace Violation"
+      description: "Target or path outside reachable workspace."
+      modes:
+        - joint_limit_exceeded
+        - singularity_encountered
+        - unreachable_target
+        - path_outside_workspace
+
+    - id: force
+      name: "Force/Torque Violation"
+      description: "Excessive or insufficient force application."
+      modes:
+        - force_limit_exceeded
+        - torque_limit_exceeded
+        - insufficient_contact_force
+        - impact_force_spike
+
+    - id: perception
+      name: "Perception Failure"
+      description: "Sensor or vision system misidentification."
+      modes:
+        - object_misdetection
+        - pose_estimation_error
+        - occlusion_unhandled
+        - lighting_failure
+        - sensor_noise
+
+    - id: planning
+      name: "Planning Failure"
+      description: "Motion or task planning did not produce valid trajectory."
+      modes:
+        - no_valid_path
+        - timeout
+        - planner_crash
+        - constraint_violation
+        - goal_infeasible
+
+    - id: runtime
+      name: "Runtime Failure"
+      description: "System-level failure during execution."
+      modes:
+        - communication_loss
+        - actuator_fault
+        - emergency_stop
+        - controller_divergence
+        - power_loss
+
+  severity_map:
+    missed_grasp: medium
+    slip_during_lift: high
+    insufficient_force: medium
+    wrong_grip_pose: low
+    object_deformation: medium
+    self_collision: high
+    obstacle_collision: critical
+    human_collision: critical
+    table_contact: medium
+    unexpected_contact: medium
+    joint_limit_exceeded: high
+    singularity_encountered: high
+    unreachable_target: medium
+    path_outside_workspace: high
+    force_limit_exceeded: critical
+    torque_limit_exceeded: high
+    insufficient_contact_force: medium
+    impact_force_spike: high
+    object_misdetection: medium
+    pose_estimation_error: high
+    occlusion_unhandled: medium
+    lighting_failure: low
+    sensor_noise: low
+    no_valid_path: medium
+    timeout: medium
+    planner_crash: high
+    constraint_violation: high
+    goal_infeasible: medium
+    communication_loss: critical
+    actuator_fault: critical
+    emergency_stop: critical
+    controller_divergence: high
+    power_loss: critical

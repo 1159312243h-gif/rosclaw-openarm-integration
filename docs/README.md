@@ -1,0 +1,116 @@
+# ROSClaw Documentation
+
+Welcome to the ROSClaw documentation index. This directory contains all project documentation organized by category.
+
+## Quick Navigation
+
+| Category | Documents |
+|----------|-----------|
+| [User Guides](#user-guides) | Quick start, install, first boot, CLI, safety, assets |
+| [Installation & First Boot](#installation--first-boot) | Bootstrap, first boot, verification, troubleshooting |
+| [Architecture](#architecture) | Design decisions, reviews, audits |
+| [Body / Embodiment](#body--embodiment) | e-URDF, body formats, registry, routing |
+| [Practice](#practice) | Practice recording and SeekDB persistence |
+| [API & Integration](#api--integration) | API reference, MCP, ROS, OpenClaw |
+| [Development](#development) | Collaboration framework, contributing, benchmarks |
+| [Planning](#planning) | Roadmaps, sprints, release checklist |
+| [Testing](#testing) | Reviewed evidence, verification, ROS integration |
+
+---
+
+## User Guides
+
+- **[QUICKSTART.md](../QUICKSTART.md)** — 5-minute quick start with four paths.
+- **[INSTALL.md](../INSTALL.md)** — Detailed installation options and troubleshooting.
+- **[FIRSTBOOT.md](FIRSTBOOT.md)** — Bootstrap and first boot reference.
+- **[EXAMPLE_WORKFLOW.md](EXAMPLE_WORKFLOW.md)** — Desktop pick-and-place closed-loop example.
+- **[CLI.md](CLI.md)** — CLI command reference with Stable / Experimental / Planned / Research labels.
+- **[SAFETY.md](SAFETY.md)** — Safety model, hard rules, and deployment checklist.
+- **[ROBOT_PACKS.md](ROBOT_PACKS.md)** — Signed hardware bundles, lifecycle, support tiers, and RealSense acceptance.
+- **[APPS.md](APPS.md)** — Capability-only task manifests, CLI lifecycle, and Runtime safety boundary.
+- **[ASSETS.md](ASSETS.md)** — Physical-AI Asset Hub and asset lifecycle.
+- **[hub/README.md](hub/README.md)** — Hub workflows and registry setup.
+
+---
+
+## Installation & First Boot
+
+- **[FIRSTBOOT.md](FIRSTBOOT.md)** — Complete bootstrap and first boot guide for end users, CI, and developers.
+
+---
+
+## Architecture
+
+- **[ARCHITECTURE.md](../ARCHITECTURE.md)** — Runtime architecture and 14 Engineering Iron Rules.
+- **[AUDIT_REPORT_v1.0_POST_RELEASE.md](AUDIT_REPORT_v1.0_POST_RELEASE.md)** — Post-release audit report.
+
+---
+
+## Body / Embodiment
+
+- **[body/EMBODIMENT_FORMAT.md](body/EMBODIMENT_FORMAT.md)** — e-URDF / `body.yaml` / `EMBODIMENT.md` three-layer format.
+- **[body/TESTING.md](body/TESTING.md)** — Body subsystem testing guide.
+- **[body/MIGRATION.md](body/MIGRATION.md)** — Migration notes for body and embodiment changes.
+- **[body/BODY_REGISTRY.md](body/BODY_REGISTRY.md)** — Multi-body registry, `list`/`create`/`switch`/`remove`, and `--body` routing.
+- **[body/BODY_HISTORY_EXPORT.md](body/BODY_HISTORY_EXPORT.md)** — Body snapshots, `history`, `export`, and restoration workflow.
+- **[body/SKILL_COMPATIBILITY.md](body/SKILL_COMPATIBILITY.md)** — Skill compatibility statuses and enforcement.
+- **[body/FLEET_OPERATIONS.md](body/FLEET_OPERATIONS.md)** — Fleet-wide compatibility aggregation and fleet CLI commands.
+- **[body/URI_SCHEME.md](body/URI_SCHEME.md)** — Stable `rosclaw://` references to body and e-URDF resources.
+- **[BODYSENSE_SCHEMA.md](BODYSENSE_SCHEMA.md)** — Body sense schema reference.
+
+---
+
+## Practice
+
+- **[practice/SEEKDB_INTEGRATION.md](practice/SEEKDB_INTEGRATION.md)** — Persist practice episodes to SeekDB via `rosclaw_practice`.
+
+---
+
+## API & Integration
+
+- **[API_REFERENCE.md](API_REFERENCE.md)** — Complete public API reference for ROSClaw v1.0.
+- **[MCP_USAGE.md](MCP_USAGE.md)** — Chinese-language guide to using MCP with ROSClaw.
+- **[HARDWARE_MCP_ONBOARDING.md](HARDWARE_MCP_ONBOARDING.md)** — Auto-install, bind, and health-check hardware MCP servers.
+- **[P0_AGENT_INTEGRATION.md](P0_AGENT_INTEGRATION.md)** — P0 agent integration guide.
+- **[OPENCLAW_INTEGRATION.md](OPENCLAW_INTEGRATION.md)** — OpenClaw integration guide.
+- **[ROS_CONNECTOR.md](ROS_CONNECTOR.md)** — ROS connector documentation.
+- **[ROS_INTEGRATION_TESTING.md](ROS_INTEGRATION_TESTING.md)** — Cross-project ROS 1 / ROS 2 integration test matrix.
+- **[SENSE.md](SENSE.md)** — Sense subsystem documentation.
+- **[EVENT_TOPICS.md](EVENT_TOPICS.md)** — Event topic reference.
+
+---
+
+## Development
+
+- **[REPOSITORY_LAYOUT.md](REPOSITORY_LAYOUT.md)** — Root contracts, source ownership, and artifact retention rules.
+- **[BENCHMARK.md](BENCHMARK.md)** — Performance benchmarks (EventBus, SeekDB, SkillRegistry, FirewallValidator).
+- **[simforge/corebench_v1.md](simforge/corebench_v1.md)** — CoreBench schemas, evidence boundary, Gate V3, and reproduction commands.
+- **[simforge/failure_to_success_arena.md](simforge/failure_to_success_arena.md)** — Phase 3 ContactPush causal loop, module proofs, four-GPU acceptance, Gazebo process chaos, and showcase export.
+- **[help/rosclaw-simforge-phase2-implementation-report.md](help/rosclaw-simforge-phase2-implementation-report.md)** — Phase 2 implementation and local simulation evidence report.
+- **[help/rosclaw-simforge-phase3-implementation-report.md](help/rosclaw-simforge-phase3-implementation-report.md)** — Phase 3 implementation, causal results, process-chaos evidence, hashes, and evidence ceiling.
+- **[validation/GOALFORGE_PHASE4.md](validation/GOALFORGE_PHASE4.md)** — Phase 4 G1 GoalForge physical kick loop, Practice-to-MLP flywheel, four-GPU holdout isolation, Promotion Gate V4, Unitree DDS fail-closed execution, and MP4 evidence replay.
+- **[help/rosclaw-simforge-phase4-implementation-report.md](help/rosclaw-simforge-phase4-implementation-report.md)** — Phase 4 implementation, physical recovery, Practice flywheel, four-GPU screening, DDS chaos, proof hashes, and evidence ceiling.
+- **[INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md)** — Integration guide.
+- **[G1_SENSE_DEMO.md](G1_SENSE_DEMO.md)** — Unitree G1 sense demo.
+
+---
+
+## Planning
+
+- **[../ROSCLAW.md](../ROSCLAW.md)** — Project whitepaper (Chinese).
+- **[../CHANGELOG.md](../CHANGELOG.md)** — Release changelog.
+
+---
+
+## Testing
+
+- **[evidence/README.md](evidence/README.md)** — Retention and review rules for product evidence.
+- **[ROS_INTEGRATION_TESTING.md](ROS_INTEGRATION_TESTING.md)** — Cross-project ROS 1 / ROS 2 integration test matrix.
+
+---
+
+## Contributing
+
+See [../CONTRIBUTING.md](../CONTRIBUTING.md) for development standards, PR process, and code style guidelines.
+
+See [../CLAUDE.md](../CLAUDE.md) for Claude Code onboarding notes.

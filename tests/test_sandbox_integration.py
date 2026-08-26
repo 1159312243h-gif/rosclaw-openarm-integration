@@ -1,0 +1,99 @@
+"""Integration tests for rosclaw-sandbox in v1.0 Runtime."""
+
+from pathlib import Path
+
+
+class TestSandboxRuntimeAdapter:
+    def test_adapter_imports(self):
+        """Verify SandboxRuntimeAdapter can be imported."""
+        from rosclaw.sandbox.runtime_adapter import SandboxRuntimeAdapter
+
+        assert SandboxRuntimeAdapter is not None
+
+    def test_adapter_lifecycle(self):
+        """Test SandboxRuntimeAdapter initialize/start/stop lifecycle."""
+        from rosclaw.core.event_bus import EventBus
+        from rosclaw.sandbox.runtime_adapter import SandboxRuntimeAdapter
+
+        bus = EventBus()
+        adapter = SandboxRuntimeAdapter(
+            config={"engine": "mujoco", "world_id": "empty", "robot_id": "universal_robots_ur5e"},
+            event_bus=bus,
+        )
+        adapter._do_initialize()
+        assert adapter._sandbox_service is not None
+
+        adapter._do_start()
+        adapter._do_stop()
+
+    def test_adapter_health(self):
+        """Test health report."""
+        from rosclaw.core.event_bus import EventBus
+        from rosclaw.sandbox.runtime_adapter import SandboxRuntimeAdapter
+
+        bus = EventBus()
+        adapter = SandboxRuntimeAdapter(
+            config={"engine": "mujoco", "world_id": "empty", "robot_id": "universal_robots_ur5e"},
+            event_bus=bus,
+        )
+        adapter._do_initialize()
+
+        health = adapter.health()
+        assert health["status"] == "healthy"
+        assert health["engine"] == "mujoco"
+        assert health["world"] == "empty"
+        assert "session_id" in health
+
+        adapter._do_stop()
+
+    def test_trajectory_validation(self):
+        """Test dynamic trajectory validation."""
+        from rosclaw.core.event_bus import EventBus
+        from rosclaw.sandbox.runtime_adapter import SandboxRuntimeAdapter
+
+        bus = EventBus()
+        adapter = SandboxRuntimeAdapter(
+            config={"engine": "mujoco", "world_id": "empty", "robot_id": "universal_robots_ur5e"},
+            event_bus=bus,
+        )
+        adapter._do_initialize()
+
+        result = adapter.validate_trajectory(
+            trajectory=[[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            safety_level="MODERATE",
+        )
+
+        assert "is_safe" in result
+        assert "risk_score" in result
+        adapter._do_stop()
+
+
+class TestFirewallDynamicCollision:
+    def test_mj_step_replaces_mj_forward(self):
+        """Verify firewall validator uses mj_step for dynamic simulation."""
+        import inspect
+
+        from rosclaw.firewall.validator import FirewallValidator
+
+        source = inspect.getsource(FirewallValidator._check_mujoco_collision)
+        assert "mj_step" in source
+        # mj_forward may still be used for state restoration after simulation,
+        # but mj_step must be the primary simulation method
+        assert "dynamic simulation" in source or "mj_step" in source
+
+
+class TestMCPLegacyExecutionBoundary:
+    def test_ur5_server_requires_rosclawd_action_boundary(self):
+        """Verify the standalone UR5 MCP cannot dispatch direct motion."""
+
+        # Read source without importing (avoids rclpy dependency)
+        mcp_path = Path(__file__).parent.parent / "src" / "rosclaw" / "mcp" / "ur5_server.py"
+        with open(mcp_path) as f:
+            source = f.read()
+
+        assert "ROSCLAWD_REQUEST_ACTION_REQUIRED" in source
+        assert "from rosclaw.daemon.client import DaemonClient" in source
+        assert '"no_command_dispatched": True' in source
+        assert "from rclpy.action import ActionClient" not in source
+        assert "FollowJointTrajectory" not in source
+        assert "firewall.validation_request" not in source

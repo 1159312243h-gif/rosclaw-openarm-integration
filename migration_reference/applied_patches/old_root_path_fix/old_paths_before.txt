@@ -1,0 +1,11 @@
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py:15:WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_limits_20260812_153918:15:WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_axis_fix_20260812_151850:15:WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/config/openarm_sim.yaml:3:    model_path: /home/hkz/openarm_rosclaw/models/openarm_dual_mujoco_01/robot.mjcf.xml
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/config/openarm_sim.yaml:4:    srdf_path: /home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py:138:            "model_path", "/home/hkz/openarm_rosclaw/ros_ws/mujoco_models/mujoco_arm.xml"
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py:142:            "/home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py.before_boundary_20260812_160633:122:            "model_path", "/home/hkz/openarm_rosclaw/ros_ws/mujoco_models/mujoco_arm.xml"
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py.before_boundary_20260812_160633:126:            "/home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/launch/openarm_pick_demo.launch.py:19:    project = Path(os.environ.get("OPENARM_PROJECT_ROOT", "/home/hkz/openarm_rosclaw"))
+/home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_openarm_bringup/launch/openarm_sim.launch.py:31:        os.environ.get("OPENARM_PROJECT_ROOT", "/home/hkz/openarm_rosclaw")

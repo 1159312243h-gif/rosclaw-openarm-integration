@@ -1,0 +1,26 @@
+mujoco_moveit_bridge:
+  ros__parameters:
+    model_path: /home/hkz/rosclaw_openarm_integration/models/openarm_dual_mujoco_01/robot.mjcf.xml
+    srdf_path: /home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf
+    position_gain: 0.15
+    goal_tolerance: 0.003
+    gripper_goal_tolerance: 0.0005
+    gripper_velocity_tolerance: 0.001
+    gripper_settle_time: 0.5
+    goal_time_margin: 5.0
+    collision_penetration_threshold: 0.003
+    ignore_same_arm_self_collisions: true
+    enable_legacy_topic: false
+    enable_gripper_controllers: false
+    headless: false
+
+relative_motion_server:
+  ros__parameters:
+    planning_frame: world
+    minimum_path_fraction: 0.999
+    max_translation: 0.02
+    default_velocity_scale: 0.05
+    default_acceleration_scale: 0.05
+    verification_position_tolerance: 0.0005
+    verification_timeout: 8.0
+    request_id_cache_size: 4096

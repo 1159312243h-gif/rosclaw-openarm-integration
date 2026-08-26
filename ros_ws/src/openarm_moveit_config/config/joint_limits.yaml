@@ -1,0 +1,130 @@
+# 完整的关节限制配置 - 速度和加速度限制
+# 这些参数对 MoveIt 轨迹规划至关重要
+
+joint_limits:
+  openarm_left_joint1:
+    has_position_limits: true
+    min_position: -3.49
+    max_position: 1.40
+    has_velocity_limits: true
+    max_velocity: 2.0  # rad/s
+    has_acceleration_limits: true
+    max_acceleration: 4.0  # rad/s^2
+
+  openarm_left_joint2:
+    has_position_limits: true
+    min_position: -3.32
+    max_position: 0.17
+    has_velocity_limits: true
+    max_velocity: 2.0
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+
+  openarm_left_joint3:
+    has_position_limits: true
+    min_position: -1.57
+    max_position: 1.57
+    has_velocity_limits: true
+    max_velocity: 3.0
+    has_acceleration_limits: true
+    max_acceleration: 6.0
+
+  openarm_left_joint4:
+    has_position_limits: true
+    min_position: 0.0
+    max_position: 2.44
+    has_velocity_limits: true
+    max_velocity: 3.0
+    has_acceleration_limits: true
+    max_acceleration: 6.0
+
+  openarm_left_joint5:
+    has_position_limits: true
+    min_position: -1.57
+    max_position: 1.57
+    has_velocity_limits: true
+    max_velocity: 4.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+
+  openarm_left_joint6:
+    has_position_limits: true
+    min_position: -0.79
+    max_position: 0.79
+    has_velocity_limits: true
+    max_velocity: 4.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+
+  openarm_left_joint7:
+    has_position_limits: true
+    min_position: -1.57
+    max_position: 1.57
+    has_velocity_limits: true
+    max_velocity: 4.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+
+  # 右臂（镜像）
+  openarm_right_joint1:
+    has_position_limits: true
+    min_position: -1.40
+    max_position: 3.49
+    has_velocity_limits: true
+    max_velocity: 2.0
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+
+  openarm_right_joint2:
+    has_position_limits: true
+    min_position: -3.32
+    max_position: 0.17
+    has_velocity_limits: true
+    max_velocity: 2.0
+    has_acceleration_limits: true
+    max_acceleration: 4.0
+
+  openarm_right_joint3:
+    has_position_limits: true
+    min_position: -1.57
+    max_position: 1.57
+    has_velocity_limits: true
+    max_velocity: 3.0
+    has_acceleration_limits: true
+    max_acceleration: 6.0
+
+  openarm_right_joint4:
+    has_position_limits: true
+    min_position: 0.0
+    max_position: 2.44
+    has_velocity_limits: true
+    max_velocity: 3.0
+    has_acceleration_limits: true
+    max_acceleration: 6.0
+
+  openarm_right_joint5:
+    has_position_limits: true
+    min_position: -1.57
+    max_position: 1.57
+    has_velocity_limits: true
+    max_velocity: 4.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+
+  openarm_right_joint6:
+    has_position_limits: true
+    min_position: -0.79
+    max_position: 0.79
+    has_velocity_limits: true
+    max_velocity: 4.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0
+
+  openarm_right_joint7:
+    has_position_limits: true
+    min_position: -1.57
+    max_position: 1.57
+    has_velocity_limits: true
+    max_velocity: 4.0
+    has_acceleration_limits: true
+    max_acceleration: 8.0

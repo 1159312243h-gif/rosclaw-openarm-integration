@@ -1,0 +1,71 @@
+capability_version: "1.0"
+robot_id: openarm_dual_mujoco_01
+
+capabilities:
+  - id: openarm.arm.move_relative
+    name: move_relative
+    category: manipulation
+    description: Move one OpenArm end effector by a bounded Cartesian translation
+    skill_type: programmed
+
+    inputs:
+      - name: arm
+        type: str
+        allowed: [left, right]
+
+      - name: reference_frame
+        type: str
+        allowed: [world]
+        default: world
+
+      - name: translation
+        type: vector3
+        unit: m
+        frame: world
+
+      - name: velocity_scale
+        type: float
+        default: 0.05
+        range: [0.01, 0.10]
+
+      - name: acceleration_scale
+        type: float
+        default: 0.05
+        range: [0.01, 0.10]
+
+      - name: avoid_collisions
+        type: bool
+        default: false
+
+    preconditions:
+      - ros2_action_worker_available
+      - moveit_cartesian_planning_available
+      - moveit_execute_trajectory_available
+      - mujoco_follow_joint_trajectory_available
+      - openarm_moveit_executor_registered
+
+    postconditions:
+      - requested_cartesian_translation_verified
+
+    required_software:
+      - rosclaw
+      - mujoco
+      - ros2_jazzy
+      - moveit2
+
+    constraints:
+      execution_modes: [SIMULATION]
+      allowed_arms: [left, right]
+      allowed_reference_frames: [world]
+      max_abs_translation_component_m: 0.02
+      max_translation_norm_m: 0.02
+      max_final_error_m: 0.0005
+
+    safety:
+      - simulation_only
+      - reject_unknown_arguments
+      - reject_unverified_results
+      - require_moveit_planning_and_execution
+      - forbid_direct_mujoco_fallback
+      - one_active_request_per_arm
+      - fail_closed

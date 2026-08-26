@@ -1,0 +1,68 @@
+safety_level: STRICT
+
+# Drone-specific safety parameters
+flight_envelope:
+  max_horizontal_speed: 2.0
+  max_vertical_speed: 1.0
+  max_angular_rate: 6.28
+  max_bank_angle: 0.524
+  max_climb_rate: 1.0
+  max_descent_rate: 0.5
+
+altitude_limits:
+  max_agl: 10.0
+  min_agl: 0.05
+
+geofence:
+  type: cylinder
+  center: [0, 0]
+  radius: 50.0
+  height_min: 0.0
+  height_max: 10.0
+  action: land
+
+battery_safety:
+  min_voltage: 3.0
+  max_voltage: 4.2
+  min_capacity_percent: 10.0
+  critical_capacity_percent: 5.0
+  action_at_critical: forced_landing
+
+motor_safety:
+  max_rpm: 30000
+  max_temperature: 60.0
+  imbalance_threshold: 0.20
+
+collision_avoidance:
+  enabled: true
+  min_distance: 0.3
+  reaction_time_ms: 50.0
+  sensors:
+    - multi_ranger_front
+    - multi_ranger_back
+    - multi_ranger_left
+    - multi_ranger_right
+  action: hover
+
+emergency_procedures:
+  signal_loss:
+    timeout_sec: 1.0
+    action: land
+  low_battery:
+    threshold_percent: 10.0
+    action: land
+  motor_failure:
+    action: emergency_landing
+    min_motors_required: 3
+
+swarm_safety:
+  min_inter_drone_distance: 0.3
+  max_swarm_size: 49
+  collision_avoidance_between_drones: true
+
+environment:
+  max_wind_speed: 2.0
+  max_temperature: 40.0
+  min_temperature: 0.0
+  max_humidity: 80.0
+  indoor_only: true

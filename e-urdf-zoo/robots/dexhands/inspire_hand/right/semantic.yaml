@@ -1,0 +1,78 @@
+schema_version: e_urdf.semantic.v1
+identity:
+  robot_type: dexterous_hand
+  side: right
+frames:
+  root: base_link
+  mounting: mounting
+  tcp: tcp
+groups:
+  palm:
+    type: palm
+    links:
+      - base_link
+    joints: []
+    side: right
+    roles:
+      - base
+      - mount
+    source: heuristic
+    confidence: 0.8
+    warnings: []
+  thumb:
+    type: finger
+    links:
+      - thumb_base
+      - thumb_tip
+    joints:
+      - thumb_joint_0
+      - thumb_joint_1
+    side: right
+    roles:
+      - opposition
+    source: heuristic
+    confidence: 0.7
+    warnings: []
+  index:
+    type: finger
+    links:
+      - index_base
+      - index_tip
+    joints:
+      - index_joint_0
+      - index_joint_1
+    side: right
+    roles:
+      - precision
+    source: heuristic
+    confidence: 0.7
+    warnings: []
+  fingers:
+    type: finger_group
+    links:
+      - middle_base
+      - ring_base
+      - little_base
+    joints:
+      - middle_joint_0
+      - ring_joint_0
+      - little_joint_0
+    side: right
+    roles:
+      - power_grasp
+    source: heuristic
+    confidence: 0.6
+    warnings: []
+contact_surfaces:
+  fingertip_contact:
+    group_type: fingertip
+    links:
+      - thumb_tip
+      - index_tip
+    source: heuristic
+mounting:
+  compatible_mounts:
+    - universal_wrist_mount
+  required_adapter: null
+notes:
+  - Minimal semantic map for test fixtures.

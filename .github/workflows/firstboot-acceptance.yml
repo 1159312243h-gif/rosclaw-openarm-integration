@@ -1,0 +1,32 @@
+name: First Boot Acceptance
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  acceptance:
+    name: First Boot Acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: actions/setup-python@v6.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Run firstboot acceptance
+        run: |
+          export ROSCLAW_DEV_SOURCE=1
+          bash scripts/acceptance_firstboot.sh
+
+      - name: Upload workspace artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: rosclaw-firstboot-workspace
+          path: /tmp/rosclaw-firstboot-*/

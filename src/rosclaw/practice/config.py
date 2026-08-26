@@ -1,0 +1,193 @@
+"""Configuration and session objects for rosclaw-practice."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from rosclaw.firstboot.workspace import get_rosclaw_home
+
+PRACTICE_DATA_ROOT_ENV = "ROSCLAW_PRACTICE_DATA_ROOT"
+
+
+def get_default_data_root() -> Path:
+    """Return the writable Practice root for the active ROSClaw workspace."""
+    configured = os.environ.get(PRACTICE_DATA_ROOT_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return get_rosclaw_home() / "data" / "practice"
+
+
+def resolve_data_root(data_root: str | Path | None = None) -> Path:
+    """Resolve an explicit Practice root or the active workspace default."""
+    if data_root is None or not str(data_root).strip():
+        return get_default_data_root()
+    return Path(data_root).expanduser()
+
+
+# Compatibility exports for callers that imported the original constants.
+# Internal defaults use the functions above so ROSCLAW_HOME remains dynamic.
+DEFAULT_DATA_ROOT = str(get_default_data_root())
+DEFAULT_FALLBACK_DIR = str(get_default_data_root() / "fallback")
+DEFAULT_INDEX_DIR = str(get_default_data_root() / "indexes")
+DEFAULT_CONFIG_ROOT = get_rosclaw_home() / "practice"
+
+
+@dataclass
+class RecorderConfig:
+    """Writer settings for a practice session."""
+
+    jsonl_enabled: bool = True
+    jsonl_rotate_mb: float = 512.0
+
+    mcap_enabled: bool = False
+    mcap_compression: str = "zstd"
+    mcap_chunk_size_bytes: int = 4 * 1024 * 1024
+
+    frames_enabled: bool = False
+    # Continuous camera frame recording: emit one frame_event per sampled
+    # frame at ``frame_hz`` and save keyframe images at ``keyframe_hz``.
+    frame_hz: float = 30.0
+    keyframe_hz: float = 1.0
+
+    # Continuous telemetry sampling
+    telemetry_enabled: bool = True
+    telemetry_hz: float = 5.0
+    rgb_format: str = "jpg"
+    depth_format: str = "png16"
+
+    # Maximum time session finalize waits for the catalog batch writers to
+    # commit every queued event before the manifest is written.  A timeout
+    # never aborts finalize (the robot must not be blocked); an unsatisfied
+    # barrier is logged CRITICAL and surfaced via ``db reconcile``.
+    finalize_flush_timeout_sec: float = 30.0
+
+
+@dataclass
+class SeekDBConfig:
+    """SeekDB integration settings.
+
+    ``url`` is the SQL DSN for the knowledge store (sqlite:// or mysql://).
+    ``http_adapter_url`` is the HTTP endpoint for the optional
+    rosclaw_practice SeekDB bridge (ExperienceCommitter).  Keeping them
+    separate removes the ambiguity that caused 2881 to be interpreted as
+    both SQL and HTTP.
+    """
+
+    enabled: bool = False
+    url: str | None = field(default_factory=lambda: os.environ.get("ROSCLAW_SEEKDB_URL"))
+    http_adapter_url: str | None = field(
+        default_factory=lambda: os.environ.get("ROSCLAW_PRACTICE_HTTP_ADAPTER_URL")
+    )
+    fallback_dir: str = field(
+        default_factory=lambda: os.environ.get(
+            "ROSCLAW_SEEKDB_FALLBACK_DIR", str(get_default_data_root() / "fallback")
+        )
+    )
+    table: str = "praxis_events"
+    timeout_sec: float = 2.0
+
+    @property
+    def integration_enabled(self) -> bool:
+        """True if any SeekDB integration (HTTP bridge or SQL ingestion) is configured."""
+        return self.enabled or bool(self.url) or bool(self.http_adapter_url)
+
+    @property
+    def sql_ingestion_enabled(self) -> bool:
+        """True if a SQL DSN is configured for post-session ingestion."""
+        return bool(self.url)
+
+
+@dataclass
+class SourceConfig:
+    """Which data sources to record."""
+
+    dds: bool = False
+    ros2: bool = False
+    camera: bool = False
+    agent: bool = True
+    provider: bool = False
+    sandbox: bool = False
+    runtime: bool = True
+    human: bool = False
+
+
+@dataclass
+class PracticeConfig:
+    """Top-level configuration for a PracticeCoordinator."""
+
+    robot_id: str = "default_robot"
+    robot_type: str | None = None
+    task_id: str | None = None
+    task_name: str | None = None
+    skill_id: str | None = None
+    session_name: str | None = None
+
+    data_root: str = field(default_factory=lambda: str(get_default_data_root()))
+    config_root: Path = field(default_factory=lambda: get_rosclaw_home() / "practice")
+    sources: SourceConfig = field(default_factory=SourceConfig)
+    recorder: RecorderConfig = field(default_factory=RecorderConfig)
+    seekdb: SeekDBConfig = field(default_factory=SeekDBConfig)
+
+    # Runtime knobs
+    mock: bool = False
+    duration_sec: float | None = None
+    sample_hz: float = 1.0
+    publish_to_event_bus: bool = True
+
+    # Optional pre-built objects (used by Runtime and tests)
+    event_bus: Any | None = None
+    seekdb_bridge: Any | None = None
+
+    @property
+    def data_root_path(self) -> Path:
+        return resolve_data_root(self.data_root)
+
+    @property
+    def sessions_dir(self) -> Path:
+        return self.data_root_path / "sessions"
+
+    @property
+    def indexes_dir(self) -> Path:
+        return self.data_root_path / "indexes"
+
+    @property
+    def fallback_dir(self) -> Path:
+        return Path(self.seekdb.fallback_dir)
+
+
+@dataclass
+class PracticeSession:
+    """Live practice session handle."""
+
+    practice_id: str
+    robot_id: str
+    task_id: str | None
+    task_name: str | None
+    skill_id: str | None
+    session_dir: Path
+    start_time_ns: int
+    start_time_utc: str
+    robot_type: str | None = None
+    session_id: str | None = None
+    episode_id: str | None = None
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PracticeSummary:
+    """Result returned when a practice session stops."""
+
+    practice_id: str
+    robot_id: str
+    outcome: str = "UNKNOWN"
+    reward: float | None = None
+    duration_ms: float | None = None
+    event_count: int = 0
+    artifact_dir: Path | None = None
+    mcap_path: Path | None = None
+    seekdb_committed: bool | None = None
+    failure_labels: list[str] = field(default_factory=list)

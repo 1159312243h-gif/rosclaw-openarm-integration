@@ -1,0 +1,7 @@
+schema_version: rosclaw.simforge.scenario_distribution.v1
+variables:
+  fault:
+    distribution: choice
+    values: [agent_kill, rosbridge_loss, odom_stale, worker_crash, command_drop, ack_drop, malformed_observation, duplicate_command, daemon_restart]
+  delay_ms: {distribution: choice, values: [0, 10, 100, 1000]}
+constraints: []

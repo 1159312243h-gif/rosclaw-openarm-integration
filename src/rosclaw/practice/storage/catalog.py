@@ -1,0 +1,1053 @@
+"""Local SQLite catalog for practice sessions, events, and artifacts."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import queue
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("rosclaw.practice.storage.catalog")
+
+
+def _strip_watermark_key(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *record* without the internal ``_wm`` sequence key."""
+    if "_wm" not in record:
+        return record
+    return {k: v for k, v in record.items() if k != "_wm"}
+
+
+def _is_transient_flush_error(exc: Exception) -> bool:
+    """True for database errors worth retrying (locks, busy), not logic bugs."""
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+class _BatchWriter:
+    """Threaded batch inserter for catalog tables.
+
+    Records are queued and flushed either when the batch reaches
+    ``batch_size`` or ``flush_interval_ms`` elapse.  The worker is a daemon
+    thread so a crashing process does not hang on a stuck writer; ``close()``
+    drains the queue and joins the thread.
+
+    Passing ``batch_size=1`` makes inserts effectively synchronous, which is
+    useful in tests that require immediate read-after-write visibility.
+    """
+
+    _POISON = object()
+
+    def __init__(
+        self,
+        name: str,
+        flush_fn: Any,
+        batch_size: int = 500,
+        flush_interval_ms: float = 300.0,
+        max_queue_size: int = 2000,
+        on_watermark: Any | None = None,
+        max_flush_retries: int = 10,
+    ):
+        self.name = name
+        self._flush_fn = flush_fn
+        self._batch_size = max(1, int(batch_size))
+        self._flush_interval_s = max(0.001, float(flush_interval_ms)) / 1000.0
+        self._queue: queue.Queue = queue.Queue(maxsize=max(1, int(max_queue_size)))
+        self._lock = threading.Lock()
+        self._closed = False
+        self._close_complete = False
+        self._poisoned = False
+        self._overflow_fallbacks = 0
+        self._failed_records: list[dict[str, Any]] = []
+        self._flush_error: Exception | None = None
+        # Transient flush failures (e.g. ``database is locked``) are retried
+        # with backoff before the writer gives up and fails loudly.
+        self._max_flush_retries = max(0, int(max_flush_retries))
+        # ``on_watermark`` receives every committed ``_wm`` sequence. Callers
+        # can therefore advance a contiguous durability watermark even when a
+        # queue-overflow fallback commits a later sequence first.
+        self._on_watermark = on_watermark
+        self._thread = threading.Thread(
+            target=self._worker, name=f"catalog-batch-{name}", daemon=True
+        )
+        self._thread.start()
+
+    def put(self, record: dict[str, Any]) -> None:
+        if self._closed:
+            raise RuntimeError(f"Batch writer {self.name} is closed")
+        if self._flush_error is not None:
+            raise RuntimeError(f"Batch writer {self.name} previously failed") from self._flush_error
+        # Synchronous path for unit tests that require read-after-write.
+        if self._batch_size == 1:
+            self._flush([record])
+            return
+        try:
+            self._queue.put(record, block=False)
+        except queue.Full:
+            with self._lock:
+                self._overflow_fallbacks += 1
+            logger.warning(
+                "Batch writer %s queue full; persisting record synchronously",
+                self.name,
+            )
+            self._flush([record])
+
+    def close(self, timeout: float = 10.0) -> bool:
+        """Stop the writer and drain pending records.  Returns True when the
+        worker thread is confirmed dead and all queued records were flushed;
+        returns False (loudly) when the worker outlived the join timeout, in
+        which case the caller must NOT close the underlying database
+        connection underneath the live writer.
+        """
+        with self._lock:
+            if self._close_complete:
+                return True
+            self._closed = True
+            needs_poison = not self._poisoned
+        if needs_poison and self._thread.is_alive():
+            try:
+                self._queue.put(self._POISON, block=True, timeout=timeout)
+                with self._lock:
+                    self._poisoned = True
+            except queue.Full:
+                logger.critical(
+                    "Batch writer %s queue stayed full during close; retry close after "
+                    "the worker makes progress",
+                    self.name,
+                )
+                return False
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            logger.critical(
+                "Batch writer %s did not stop within %.1fs; refusing to let the "
+                "database close underneath a live writer",
+                self.name,
+                timeout,
+            )
+            return False
+        final = list(self._failed_records)
+        while not self._queue.empty():
+            try:
+                item = self._queue.get_nowait()
+                if item is not self._POISON:
+                    final.append(item)
+            except queue.Empty:
+                break
+        if final:
+            try:
+                self._flush_with_retry(final)
+            except Exception:  # noqa: BLE001
+                logger.critical(
+                    "Batch writer %s failed to flush %s records on close",
+                    self.name,
+                    len(final),
+                )
+                return False
+        with self._lock:
+            self._failed_records.clear()
+            self._flush_error = None
+            self._close_complete = True
+        if self._overflow_fallbacks:
+            logger.info(
+                "Batch writer %s used synchronous overflow fallback %s times",
+                self.name,
+                self._overflow_fallbacks,
+            )
+        return True
+
+    def _worker(self) -> None:
+        while True:
+            batch: list[dict[str, Any]] = []
+            deadline: float | None = None
+            while len(batch) < self._batch_size:
+                timeout: float | None = None
+                if batch:
+                    assert deadline is not None
+                    timeout = max(0.0, deadline - time.monotonic())
+                else:
+                    timeout = None
+                try:
+                    item = self._queue.get(timeout=timeout)
+                except queue.Empty:
+                    break
+                if item is self._POISON:
+                    if not self._try_worker_flush(batch):
+                        return
+                    return
+                batch.append(item)
+                if deadline is None:
+                    deadline = time.monotonic() + self._flush_interval_s
+            if batch and not self._try_worker_flush(batch):
+                return
+
+    def _try_worker_flush(self, batch: list[dict[str, Any]]) -> bool:
+        try:
+            self._flush_with_retry(batch)
+        except Exception as exc:
+            with self._lock:
+                self._failed_records.extend(batch)
+                self._flush_error = exc
+            return False
+        return True
+
+    def _flush_with_retry(self, batch: list[dict[str, Any]]) -> None:
+        """Flush with exponential backoff on transient lock errors.
+
+        A locked database (checkpoint, concurrent writer) must not kill the
+        writer thread: events keep queueing and the flush is retried until it
+        succeeds or the retry budget is exhausted, in which case the writer
+        fails loudly instead of silently dropping the batch.
+        """
+        attempt = 0
+        while True:
+            try:
+                self._flush(batch)
+                return
+            except Exception as exc:
+                attempt += 1
+                if attempt > self._max_flush_retries or not _is_transient_flush_error(exc):
+                    raise
+                backoff = min(0.05 * (2 ** (attempt - 1)), 2.0)
+                logger.warning(
+                    "Batch writer %s flush failed (attempt %s/%s): %s; retrying in %.2fs",
+                    self.name,
+                    attempt,
+                    self._max_flush_retries,
+                    exc,
+                    backoff,
+                )
+                time.sleep(backoff)
+
+    def _flush(self, batch: list[dict[str, Any]]) -> None:
+        if not batch:
+            return
+        try:
+            self._flush_fn(batch)
+        except Exception:
+            logger.exception("Batch writer %s flush failed", self.name)
+            raise
+        self._report_watermark(batch)
+
+    def _report_watermark(self, batch: list[dict[str, Any]]) -> None:
+        """Forward committed ``_wm`` sequences to the catalog."""
+        if self._on_watermark is None:
+            return
+        sequences = sorted(
+            {
+                value
+                for record in batch
+                if isinstance((value := record.get("_wm")), int) and value > 0
+            }
+        )
+        if sequences:
+            try:
+                self._on_watermark(sequences)
+            except Exception:  # noqa: BLE001
+                logger.exception("Batch writer %s watermark callback failed", self.name)
+
+
+class PracticeCatalog:
+    """SQLite-backed index of practices, events, and artifacts.
+
+    Version 2 adds ``practice_sessions``, ``practice_episodes``,
+    ``practice_artifacts`` (with schema metadata), and ``practice_event_index``
+    tables. Existing ``practices``, ``events``, ``failures``, and ``artifacts``
+    tables are preserved for backward compatibility, and the new tables are
+    created with ``IF NOT EXISTS`` so old catalogs migrate automatically.
+    """
+
+    _SCHEMA = """
+    CREATE TABLE IF NOT EXISTS practices (
+        practice_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        episode_id TEXT,
+        robot_id TEXT,
+        robot_type TEXT,
+        task_id TEXT,
+        task_name TEXT,
+        skill_id TEXT,
+        start_time TEXT,
+        end_time TEXT,
+        duration_ms REAL,
+        outcome TEXT,
+        reward REAL,
+        manifest_path TEXT,
+        events_jsonl_path TEXT,
+        replay_path TEXT,
+        failure_report_path TEXT,
+        seekdb_committed INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS events (
+        event_id TEXT PRIMARY KEY,
+        practice_id TEXT,
+        source TEXT,
+        event_type TEXT,
+        timestamp_ns INTEGER,
+        timestamp_utc TEXT,
+        action_id TEXT,
+        task_id TEXT,
+        skill_id TEXT,
+        payload_ref TEXT,
+        tags TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS failures (
+        failure_id TEXT PRIMARY KEY,
+        practice_id TEXT,
+        failure_type TEXT,
+        severity TEXT,
+        source TEXT,
+        related_action_id TEXT,
+        description TEXT,
+        timestamp_ns INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        practice_id TEXT,
+        artifact_type TEXT,
+        path TEXT,
+        checksum TEXT,
+        size_bytes INTEGER,
+        created_at TEXT
+    );
+
+    -- v2 tables ---------------------------------------------------------
+
+    CREATE TABLE IF NOT EXISTS practice_sessions (
+        session_id TEXT PRIMARY KEY,
+        practice_id TEXT,
+        body_id TEXT,
+        task_name TEXT,
+        started_at TEXT,
+        ended_at TEXT,
+        status TEXT,
+        outcome TEXT,
+        event_count INTEGER DEFAULT 0,
+        artifact_count INTEGER DEFAULT 0,
+        metadata_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS practice_episodes (
+        episode_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        body_id TEXT,
+        skill_id TEXT,
+        policy_id TEXT,
+        started_at TEXT,
+        ended_at TEXT,
+        outcome TEXT,
+        success INTEGER,
+        failure_labels_json TEXT,
+        metrics_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS practice_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        episode_id TEXT,
+        artifact_type TEXT,
+        path TEXT,
+        sha256 TEXT,
+        size_bytes INTEGER,
+        schema_name TEXT,
+        created_at TEXT,
+        metadata_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS practice_event_index (
+        event_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        episode_id TEXT,
+        timestamp_ns INTEGER,
+        event_type TEXT,
+        artifact_id TEXT,
+        byte_offset INTEGER,
+        summary_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_practices_robot ON practices(robot_id);
+    CREATE INDEX IF NOT EXISTS idx_practices_task ON practices(task_id);
+    CREATE INDEX IF NOT EXISTS idx_practices_outcome ON practices(outcome);
+    CREATE INDEX IF NOT EXISTS idx_events_practice ON events(practice_id);
+    CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_body ON practice_sessions(body_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_status ON practice_sessions(status);
+    CREATE INDEX IF NOT EXISTS idx_episodes_session ON practice_episodes(session_id);
+    CREATE INDEX IF NOT EXISTS idx_episodes_body ON practice_episodes(body_id);
+    CREATE INDEX IF NOT EXISTS idx_episodes_skill ON practice_episodes(skill_id);
+    CREATE INDEX IF NOT EXISTS idx_artifacts_session ON practice_artifacts(session_id);
+    CREATE INDEX IF NOT EXISTS idx_artifacts_episode ON practice_artifacts(episode_id);
+    CREATE INDEX IF NOT EXISTS idx_artifacts_type ON practice_artifacts(artifact_type);
+    CREATE INDEX IF NOT EXISTS idx_event_index_session ON practice_event_index(session_id);
+    CREATE INDEX IF NOT EXISTS idx_event_index_episode ON practice_event_index(episode_id);
+    CREATE INDEX IF NOT EXISTS idx_event_index_type ON practice_event_index(event_type);
+    """
+
+    _LEGACY_TABLES = {
+        "practices": [
+            "practice_id",
+            "session_id",
+            "episode_id",
+            "robot_id",
+            "robot_type",
+            "task_id",
+            "task_name",
+            "skill_id",
+            "start_time",
+            "end_time",
+            "duration_ms",
+            "outcome",
+            "reward",
+            "manifest_path",
+            "events_jsonl_path",
+            "replay_path",
+            "failure_report_path",
+            "seekdb_committed",
+        ],
+        "events": [
+            "event_id",
+            "practice_id",
+            "source",
+            "event_type",
+            "timestamp_ns",
+            "timestamp_utc",
+            "action_id",
+            "task_id",
+            "skill_id",
+            "payload_ref",
+            "tags",
+        ],
+        "failures": [
+            "failure_id",
+            "practice_id",
+            "failure_type",
+            "severity",
+            "source",
+            "related_action_id",
+            "description",
+            "timestamp_ns",
+        ],
+        "artifacts": [
+            "artifact_id",
+            "practice_id",
+            "artifact_type",
+            "path",
+            "checksum",
+            "size_bytes",
+            "created_at",
+        ],
+    }
+
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        event_batch_size: int = 500,
+        event_flush_ms: float = 300.0,
+        event_max_queue: int = 2000,
+    ):
+        self._db_path = Path(db_path)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        self._event_batch_size = event_batch_size
+        self._event_flush_ms = event_flush_ms
+        self._event_max_queue = event_max_queue
+        # Durable-progress watermarks, keyed by the per-session ``_wm``
+        # sequence the recorder attaches to every queued record.  They only
+        # advance after the batch containing that sequence has been committed,
+        # so ``flush_until`` never confuses "dequeued" with "persisted".
+        self._events_watermark = 0
+        self._event_index_watermark = 0
+        self._events_completed: set[int] = set()
+        self._event_index_completed: set[int] = set()
+        self._watermark_cond = threading.Condition()
+        self._event_writer: _BatchWriter | None = self._new_event_writer()
+        self._event_index_writer: _BatchWriter | None = self._new_event_index_writer()
+        self._init_schema()
+
+    def _new_event_writer(self) -> _BatchWriter:
+        return _BatchWriter(
+            "events",
+            self._flush_events,
+            batch_size=self._event_batch_size,
+            flush_interval_ms=self._event_flush_ms,
+            max_queue_size=self._event_max_queue,
+            on_watermark=self._on_events_watermark,
+        )
+
+    def _new_event_index_writer(self) -> _BatchWriter:
+        return _BatchWriter(
+            "event_index",
+            self._flush_event_index,
+            batch_size=self._event_batch_size,
+            flush_interval_ms=self._event_flush_ms,
+            max_queue_size=self._event_max_queue,
+            on_watermark=self._on_event_index_watermark,
+        )
+
+    @staticmethod
+    def _sequences(value: int | list[int]) -> list[int]:
+        return [value] if isinstance(value, int) else value
+
+    def _on_events_watermark(self, sequences: int | list[int]) -> None:
+        with self._watermark_cond:
+            self._events_completed.update(
+                sequence
+                for sequence in self._sequences(sequences)
+                if sequence > self._events_watermark
+            )
+            while self._events_watermark + 1 in self._events_completed:
+                self._events_watermark += 1
+                self._events_completed.remove(self._events_watermark)
+            self._watermark_cond.notify_all()
+
+    def _on_event_index_watermark(self, sequences: int | list[int]) -> None:
+        with self._watermark_cond:
+            self._event_index_completed.update(
+                sequence
+                for sequence in self._sequences(sequences)
+                if sequence > self._event_index_watermark
+            )
+            while self._event_index_watermark + 1 in self._event_index_completed:
+                self._event_index_watermark += 1
+                self._event_index_completed.remove(self._event_index_watermark)
+            self._watermark_cond.notify_all()
+
+    def _init_schema(self) -> None:
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            # Wait on short-lived lock contention (e.g. a checkpoint or a
+            # concurrent reader's write txn) instead of failing the flush.
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._migrate_legacy_tables()
+            self._conn.executescript(self._SCHEMA)
+            self._conn.commit()
+
+    def _migrate_legacy_tables(self) -> None:
+        """Add missing columns to legacy tables so old catalogs stay usable."""
+        existing_tables = {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        for table, expected_columns in self._LEGACY_TABLES.items():
+            if table not in existing_tables:
+                continue
+            cursor = self._conn.execute(f"PRAGMA table_info({table})")
+            existing = {row[1] for row in cursor.fetchall()}
+            for column in expected_columns:
+                if column not in existing:
+                    logger.info("Migrating table %s: adding column %s", table, column)
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+
+    def close(self) -> None:
+        # Close writers first (they need the lock to flush) before closing the
+        # underlying connection.  If a writer refuses to die, keep the
+        # connection open: a leaked connection is recoverable, a
+        # use-after-close flush is silent data loss.
+        writers_ok = True
+        if self._event_writer is not None:
+            event_ok = self._event_writer.close()
+            writers_ok = event_ok and writers_ok
+            if event_ok:
+                self._event_writer = None
+        if self._event_index_writer is not None:
+            event_index_ok = self._event_index_writer.close()
+            writers_ok = event_index_ok and writers_ok
+            if event_index_ok:
+                self._event_index_writer = None
+        with self._lock:
+            if writers_ok:
+                self._conn.close()
+            else:
+                logger.critical(
+                    "PracticeCatalog %s closed with live batch writers; leaving the "
+                    "connection open so in-flight flushes can commit",
+                    self._db_path,
+                )
+
+    def flush(self) -> None:
+        """Flush any pending batched writes before reading."""
+        event_ok = self._event_writer is None or self._event_writer.close()
+        event_index_ok = self._event_index_writer is None or self._event_index_writer.close()
+        if not event_ok or not event_index_ok:
+            raise RuntimeError("PracticeCatalog batch writer did not flush before timeout")
+        self._event_writer = self._new_event_writer()
+        self._event_index_writer = self._new_event_index_writer()
+
+    # ------------------------------------------------------------------
+    # Durability watermarks
+    # ------------------------------------------------------------------
+
+    def advance_event_index_watermark(self, sequence_id: int) -> None:
+        """Advance the event-index watermark for intentionally skipped rows.
+
+        The recorder only queues an event-index row when the JSONL write
+        succeeded; for sequences without an index row the watermark must
+        still advance so ``flush_until`` does not wait forever.
+        """
+        self._on_event_index_watermark(sequence_id)
+
+    def advance_events_watermark(self, sequence_id: int) -> None:
+        """Advance the events watermark for sequences that will never queue.
+
+        Called by the recorder when a catalog insert itself failed loudly;
+        the gap is reported separately by the flush barrier.
+        """
+        self._on_events_watermark(sequence_id)
+
+    def watermarks(self) -> dict[str, int]:
+        """Return current durable-progress watermarks."""
+        with self._watermark_cond:
+            return {
+                "events": self._events_watermark,
+                "event_index": self._event_index_watermark,
+            }
+
+    def flush_until(self, sequence_id: int, timeout_sec: float = 30.0) -> dict[str, Any]:
+        """Wait until both batch writers have persisted up to *sequence_id*.
+
+        This is the commit-point barrier used before session finalize: it
+        returns only when every queued event and event-index record whose
+        ``_wm`` sequence is ``<= sequence_id`` has actually been committed to
+        SQLite — never merely when the in-memory queue is empty.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._watermark_cond:
+            while (
+                self._events_watermark < sequence_id
+                or self._event_index_watermark < sequence_id
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._watermark_cond.wait(timeout=min(remaining, 0.05))
+            ok = (
+                self._events_watermark >= sequence_id
+                and self._event_index_watermark >= sequence_id
+            )
+            return {
+                "ok": ok,
+                "target": sequence_id,
+                "events_watermark": self._events_watermark,
+                "event_index_watermark": self._event_index_watermark,
+            }
+
+    # ------------------------------------------------------------------
+    # Legacy compatibility
+    # ------------------------------------------------------------------
+
+    def insert_practice(self, record: dict[str, Any]) -> None:
+        cols = ", ".join(record.keys())
+        placeholders = ", ".join("?" for _ in record)
+        values = list(record.values())
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO practices ({cols}) VALUES ({placeholders})",
+                values,
+            )
+            self._conn.commit()
+
+    def insert_event(self, record: dict[str, Any]) -> None:
+        if self._event_writer is None:
+            raise RuntimeError("PracticeCatalog is closed")
+        self._event_writer.put(record)
+
+    def _flush_events(self, batch: list[dict[str, Any]]) -> None:
+        if not batch:
+            return
+        clean = [_strip_watermark_key(record) for record in batch]
+        cols = ", ".join(clean[0].keys())
+        placeholders = ", ".join("?" for _ in clean[0])
+        values = [list(record.values()) for record in clean]
+        with self._lock:
+            self._conn.executemany(
+                f"INSERT OR REPLACE INTO events ({cols}) VALUES ({placeholders})",
+                values,
+            )
+            self._conn.commit()
+
+    def update_practice(
+        self,
+        practice_id: str,
+        updates: dict[str, Any],
+    ) -> bool:
+        if not updates:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [practice_id]
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE practices SET {set_clause} WHERE practice_id = ?",
+                values,
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_practice(self, practice_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM practices WHERE practice_id = ?",
+                (practice_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_practices(
+        self,
+        robot_id: str | None = None,
+        task_id: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if robot_id:
+            where.append("robot_id = ?")
+            params.append(robot_id)
+        if task_id:
+            where.append("task_id = ?")
+            params.append(task_id)
+        if outcome:
+            where.append("outcome = ?")
+            params.append(outcome)
+        sql = "SELECT * FROM practices"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY start_time DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_events(self, practice_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE practice_id = ?",
+                (practice_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def count_source_events(self, practice_id: str) -> int:
+        """Count practice events excluding runtime lifecycle markers."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE practice_id = ? "
+                "AND event_type NOT IN ('runtime.start', 'runtime.stop')",
+                (practice_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
+    # ------------------------------------------------------------------
+    # v2: sessions
+    # ------------------------------------------------------------------
+
+    def insert_session(self, record: dict[str, Any]) -> None:
+        record = dict(record)
+        if "metadata" in record and not isinstance(record["metadata"], str):
+            record["metadata_json"] = json.dumps(record.pop("metadata"), ensure_ascii=False)
+        elif "metadata_json" in record and not isinstance(record["metadata_json"], str):
+            record["metadata_json"] = json.dumps(record["metadata_json"], ensure_ascii=False)
+        cols = ", ".join(record.keys())
+        placeholders = ", ".join("?" for _ in record)
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO practice_sessions ({cols}) VALUES ({placeholders})",
+                list(record.values()),
+            )
+            self._conn.commit()
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM practice_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_json_field(dict(row), "metadata_json")
+
+    def list_sessions(
+        self,
+        body_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if body_id:
+            where.append("body_id = ?")
+            params.append(body_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM practice_sessions"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._decode_json_field(dict(row), "metadata_json") for row in rows]
+
+    def update_session(self, session_id: str, updates: dict[str, Any]) -> bool:
+        updates = dict(updates)
+        if "metadata" in updates:
+            updates["metadata_json"] = json.dumps(updates.pop("metadata"), ensure_ascii=False)
+        if not updates:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [session_id]
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE practice_sessions SET {set_clause} WHERE session_id = ?",
+                values,
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # v2: episodes
+    # ------------------------------------------------------------------
+
+    def insert_episode(self, record: dict[str, Any]) -> None:
+        record = dict(record)
+        record = self._encode_json_fields(record, ["failure_labels", "metrics"])
+        if "success" in record:
+            record["success"] = 1 if record["success"] else 0
+        cols = ", ".join(record.keys())
+        placeholders = ", ".join("?" for _ in record)
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO practice_episodes ({cols}) VALUES ({placeholders})",
+                list(record.values()),
+            )
+            self._conn.commit()
+
+    def get_episode(self, episode_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM practice_episodes WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data = self._decode_json_field(data, "failure_labels_json")
+        data = self._decode_json_field(data, "metrics_json")
+        if "success" in data and data["success"] is not None:
+            data["success"] = bool(data["success"])
+        return data
+
+    def list_episodes(
+        self,
+        session_id: str | None = None,
+        body_id: str | None = None,
+        skill_id: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if session_id:
+            where.append("session_id = ?")
+            params.append(session_id)
+        if body_id:
+            where.append("body_id = ?")
+            params.append(body_id)
+        if skill_id:
+            where.append("skill_id = ?")
+            params.append(skill_id)
+        if outcome:
+            where.append("outcome = ?")
+            params.append(outcome)
+        sql = "SELECT * FROM practice_episodes"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._decode_episode_row(row) for row in rows]
+
+    def update_episode(self, episode_id: str, updates: dict[str, Any]) -> bool:
+        updates = dict(updates)
+        updates = self._encode_json_fields(updates, ["failure_labels", "metrics"])
+        if "success" in updates:
+            updates["success"] = 1 if updates["success"] else 0
+        if not updates:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [episode_id]
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE practice_episodes SET {set_clause} WHERE episode_id = ?",
+                values,
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # v2: artifacts
+    # ------------------------------------------------------------------
+
+    def insert_artifact_v2(self, record: dict[str, Any]) -> None:
+        record = dict(record)
+        record = self._encode_json_fields(record, ["metadata"])
+        cols = ", ".join(record.keys())
+        placeholders = ", ".join("?" for _ in record)
+        with self._lock:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO practice_artifacts ({cols}) VALUES ({placeholders})",
+                list(record.values()),
+            )
+            self._conn.commit()
+
+    def get_artifact_v2(self, artifact_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM practice_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_json_field(dict(row), "metadata_json")
+
+    def list_artifacts_v2(
+        self,
+        session_id: str | None = None,
+        episode_id: str | None = None,
+        artifact_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if session_id:
+            where.append("session_id = ?")
+            params.append(session_id)
+        if episode_id:
+            where.append("episode_id = ?")
+            params.append(episode_id)
+        if artifact_type:
+            where.append("artifact_type = ?")
+            params.append(artifact_type)
+        sql = "SELECT * FROM practice_artifacts"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._decode_json_field(dict(row), "metadata_json") for row in rows]
+
+    # ------------------------------------------------------------------
+    # v2: event index
+    # ------------------------------------------------------------------
+
+    def insert_event_index(self, record: dict[str, Any]) -> None:
+        record = dict(record)
+        record = self._encode_json_fields(record, ["summary"])
+        if self._event_index_writer is None:
+            raise RuntimeError("PracticeCatalog is closed")
+        self._event_index_writer.put(record)
+
+    def _flush_event_index(self, batch: list[dict[str, Any]]) -> None:
+        if not batch:
+            return
+        clean = [_strip_watermark_key(record) for record in batch]
+        cols = ", ".join(clean[0].keys())
+        placeholders = ", ".join("?" for _ in clean[0])
+        values = [list(record.values()) for record in clean]
+        with self._lock:
+            self._conn.executemany(
+                f"INSERT OR REPLACE INTO practice_event_index ({cols}) VALUES ({placeholders})",
+                values,
+            )
+            self._conn.commit()
+
+    def get_event_index(self, event_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM practice_event_index WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_json_field(dict(row), "summary_json")
+
+    def list_event_index(
+        self,
+        session_id: str | None = None,
+        episode_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if session_id:
+            where.append("session_id = ?")
+            params.append(session_id)
+        if episode_id:
+            where.append("episode_id = ?")
+            params.append(episode_id)
+        if event_type:
+            where.append("event_type = ?")
+            params.append(event_type)
+        sql = "SELECT * FROM practice_event_index"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY timestamp_ns LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._decode_json_field(dict(row), "summary_json") for row in rows]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _encode_json_fields(record: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+        record = dict(record)
+        for field_name in fields:
+            json_field = f"{field_name}_json"
+            if field_name in record and not isinstance(record[field_name], str):
+                record[json_field] = json.dumps(record.pop(field_name), ensure_ascii=False)
+            elif json_field in record and not isinstance(record[json_field], str):
+                record[json_field] = json.dumps(record[json_field], ensure_ascii=False)
+        return record
+
+    @staticmethod
+    def _decode_json_field(data: dict[str, Any], json_field: str) -> dict[str, Any]:
+        data = dict(data)
+        value = data.get(json_field)
+        if isinstance(value, str):
+            with contextlib.suppress(json.JSONDecodeError):
+                data[json_field] = json.loads(value)
+        return data
+
+    @classmethod
+    def _decode_episode_row(cls, row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data = cls._decode_json_field(data, "failure_labels_json")
+        data = cls._decode_json_field(data, "metrics_json")
+        if "success" in data and data["success"] is not None:
+            data["success"] = bool(data["success"])
+        return data
+
+    def __enter__(self) -> PracticeCatalog:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()

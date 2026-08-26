@@ -1,0 +1,1186 @@
+"""CLI commands for ROSClaw storage diagnostics.
+
+Adds ``rosclaw db status`` and ``rosclaw db doctor``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import functools
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+from typing import Any
+
+from rosclaw.firstboot.config import load_rosclaw_yaml
+from rosclaw.firstboot.workspace import resolve_home
+from rosclaw.practice.config import get_default_data_root
+from rosclaw.storage.factory import StorageFactory, _sanitize_url
+from rosclaw.storage.migrations import MigrationRunner
+from rosclaw.storage.outbox import OutboxStore
+
+_NATIVE_SEEKDB_BACKENDS = {"seekdb_embedded", "seekdb_server"}
+
+
+def _close_client(client: Any) -> None:
+    """Best-effort close/disconnect for a knowledge-store client."""
+    close = getattr(client, "disconnect", None) or getattr(client, "close", None)
+    if close:
+        with contextlib.suppress(Exception):
+            close()
+
+
+def _flush_stdout() -> None:
+    """Flush stdout/stderr before returning from a db command.
+
+    The embedded SeekDB engine's teardown can bypass Python's stdio flush at
+    process exit; without this, block-buffered output (pipe/file redirect) is
+    silently lost and the command exits 0 having printed nothing.
+    """
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    with contextlib.suppress(Exception):
+        sys.stderr.flush()
+
+
+def _with_stdout_flush(fn: Any) -> Any:
+    """Decorator: guarantee buffered output lands before process teardown."""
+
+    @functools.wraps(fn)
+    def wrapper(args: argparse.Namespace) -> int:
+        try:
+            return fn(args)
+        finally:
+            _flush_stdout()
+
+    return wrapper
+
+
+def _load_storage_config(args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve storage configuration from CLI args, rosclaw.yaml, and env."""
+    home = resolve_home()
+    cfg = load_rosclaw_yaml(home) or {}
+    runtime_cfg = cfg.get("runtime", {})
+    storage_cfg = cfg.get("storage", {})
+    practice_cfg = cfg.get("practice", {})
+
+    backend = getattr(args, "backend", None) or runtime_cfg.get("seekdb_backend") or "sqlite"
+    backend = backend.lower()
+
+    url = getattr(args, "url", None)
+    if url is None:
+        url = runtime_cfg.get("seekdb_url") or os.environ.get("ROSCLAW_SEEKDB_URL")
+
+    path = getattr(args, "path", None)
+    if path is None:
+        path = runtime_cfg.get("seekdb_path") or str(home / "data" / "memory" / "knowledge.sqlite")
+
+    outbox_enabled = storage_cfg.get("outbox_enabled", False)
+    outbox_path = storage_cfg.get("outbox_path") or str(home / "storage" / "outbox.sqlite")
+
+    practice_data_root = practice_cfg.get("output_dir") or str(get_default_data_root())
+
+    return {
+        "home": home,
+        "config_found": bool(cfg),
+        "config_overridden": any(
+            getattr(args, name, None) is not None for name in ("backend", "url", "path")
+        ),
+        "backend": backend,
+        "url": url,
+        "path": path,
+        "pool_size": storage_cfg.get("pool_size", 4),
+        "vector_enabled": storage_cfg.get("vector_enabled", False),
+        "outbox_enabled": outbox_enabled,
+        "outbox_path": outbox_path,
+        "practice_data_root": practice_data_root,
+    }
+
+
+def _create_client(cfg: dict[str, Any]) -> Any:
+    """Create a knowledge-store client from resolved config."""
+    return StorageFactory.create_knowledge_store(
+        backend=cfg["backend"],
+        url=cfg["url"],
+        path=cfg["path"],
+        pool_size=cfg["pool_size"],
+        vector_enabled=cfg["vector_enabled"],
+    )
+
+
+def _sqlite_pragmas(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Read current SQLite PRAGMA settings."""
+    pragmas = {}
+    for name in ("journal_mode", "synchronous", "busy_timeout", "foreign_keys"):
+        row = connection.execute(f"PRAGMA {name}").fetchone()
+        pragmas[name] = row[0] if row else None
+    return pragmas
+
+
+def _sqlite_table_names(connection: sqlite3.Connection) -> list[str]:
+    cursor = connection.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    return [row[0] for row in cursor.fetchall()]
+
+
+def _sqlite_wal_size(path: str) -> int:
+    db_path = Path(path).expanduser()
+    wal_path = db_path.parent / f"{db_path.name}-wal"
+    return wal_path.stat().st_size if wal_path.exists() else 0
+
+
+def _mysql_table_names(connection: Any) -> list[str]:
+    """List table names from a raw MySQL connection."""
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW TABLES")
+        rows = cursor.fetchall()
+    names: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            names.append(next(iter(row.values())))
+        elif isinstance(row, (list, tuple)) and row:
+            names.append(row[0])
+    return names
+
+
+def _migration_status(client: Any, backend: str) -> dict[str, Any]:
+    """Return pending migration versions for a connected client."""
+    if backend == "memory":
+        return {"pending": 0, "versions": []}
+    try:
+        runner = MigrationRunner()
+        if backend == "sqlite":
+            pending = runner.pending(client._connection, backend)
+        else:
+            with client._connection as connection:
+                pending = runner.pending(connection, backend)
+        return {"pending": len(pending), "versions": pending}
+    except Exception as exc:  # noqa: BLE001
+        return {"pending": None, "error": str(exc)}
+
+
+def _outbox_status(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Return outbox stats, or None if the outbox is disabled."""
+    if not cfg["outbox_enabled"]:
+        return None
+    try:
+        outbox = OutboxStore(db_path=cfg["outbox_path"])
+        stats = outbox.stats()
+        outbox.close()
+        return stats
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def _vector_status(client: Any) -> dict[str, Any]:
+    """Return vector-store status for the connected client."""
+    status: dict[str, Any] = {"enabled": False}
+    if type(client).__name__ in {"SeekDBEmbeddedStore", "SeekDBServerStore", "SeekDBNativeStore"}:
+        # Native SeekDB embeds server-side on every write; there is no local
+        # warmup step.  Report the deployment mode honestly instead of the
+        # SQLite-only "disabled".
+        status["enabled"] = True
+        status["mode"] = "seekdb_native_server_side"
+        with contextlib.suppress(Exception):
+            status["collections"] = len(client.list_collections())
+        return status
+    if type(client).__name__ != "SQLiteKnowledgeStore":
+        return status
+    enabled = getattr(client, "_vector_enabled", False)
+    status["enabled"] = enabled
+    if not enabled:
+        return status
+    status["warmed"] = getattr(client, "_embedder_warmed", False)
+    try:
+        connection = client._connection
+        vec_tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'"
+            ).fetchall()
+        ]
+        status["indexed_counts"] = {
+            table[4:]: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in vec_tables
+        }
+    except Exception as exc:  # noqa: BLE001
+        status["error"] = str(exc)
+    return status
+
+
+def _practice_status(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return practice catalog and latest-session summary."""
+    data_root = cfg["practice_data_root"]
+    catalog_path = _practice_catalog_path(data_root)
+    status: dict[str, Any] = {"catalog_exists": catalog_path.exists()}
+    if catalog_path.exists():
+        try:
+            catalog_conn = sqlite3.connect(str(catalog_path), check_same_thread=False)
+            catalog_conn.row_factory = sqlite3.Row
+            count = catalog_conn.execute("SELECT COUNT(*) FROM practices").fetchone()[0]
+            catalog_conn.close()
+            status["practices"] = count
+        except Exception as exc:  # noqa: BLE001
+            status["error"] = str(exc)
+    latest_session_dir = _latest_session_dir(data_root)
+    if latest_session_dir is not None:
+        event_count, events_lines, consistent, timeline_exists = _session_event_consistency(
+            latest_session_dir
+        )
+        status["latest_session"] = {
+            "name": latest_session_dir.name,
+            "event_count": event_count,
+            "events_jsonl_lines": events_lines,
+            "consistent": consistent,
+            "timeline_exists": timeline_exists,
+        }
+    return status
+
+
+def _practice_catalog_path(data_root: str) -> Path:
+    """Return the catalog path used by PracticeLayout.
+
+    The current layout stores the catalog under ``indexes/``; the legacy root
+    path is used only as a fallback when it already exists.
+    """
+    indexes = Path(data_root) / "indexes" / "practice_catalog.sqlite"
+    legacy = Path(data_root) / "practice_catalog.sqlite"
+    return indexes if indexes.exists() or not legacy.exists() else legacy
+
+
+def _latest_session_dir(data_root: str) -> Path | None:
+    """Return the most recently modified session directory, if any."""
+    sessions_root = Path(data_root) / "sessions"
+    if not sessions_root.exists():
+        return None
+    dirs = [p for p in sessions_root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def _session_event_consistency(
+    session_dir: Path,
+) -> tuple[int | None, int, bool, bool]:
+    """Return (episode event_count, events.jsonl lines, consistent?, timeline_exists?)."""
+    episode_path = session_dir / "episode.json"
+    events_path = session_dir / "raw" / "events.jsonl"
+    timeline_path = session_dir / "timeline.jsonl"
+
+    event_count: int | None = None
+    if episode_path.exists():
+        with contextlib.suppress(Exception):
+            event_count = json.loads(episode_path.read_text(encoding="utf-8")).get("event_count")
+
+    events_lines = 0
+    if events_path.exists():
+        with events_path.open("rb") as f:
+            for _ in f:
+                events_lines += 1
+
+    timeline_exists = timeline_path.exists()
+    consistent = event_count is None or event_count == events_lines
+    return event_count, events_lines, consistent, timeline_exists
+
+
+@_with_stdout_flush
+def cmd_db_status(args: argparse.Namespace) -> int:
+    """Show storage backend status and capabilities."""
+    cfg = _load_storage_config(args)
+    try:
+        client = _create_client(cfg)
+    except Exception as exc:  # noqa: BLE001
+        if args.json:
+            print(
+                json.dumps(
+                    {"backend": cfg["backend"], "connected": False, "error": str(exc)},
+                    indent=2,
+                )
+            )
+        else:
+            print(f"[rosclaw db status] Failed to create backend: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        ping = StorageFactory.ping(client)
+        caps = StorageFactory.capabilities(client)
+        extras: dict[str, Any] = {}
+        if cfg["backend"] in {"sqlite", "mysql"}:
+            extras["migrations"] = _migration_status(client, cfg["backend"])
+        outbox_stats = _outbox_status(cfg)
+        if outbox_stats is not None:
+            extras["outbox"] = outbox_stats
+        extras["vector"] = _vector_status(client)
+        extras["practice"] = _practice_status(cfg)
+    finally:
+        _close_client(client)
+
+    display_url = _sanitize_url(str(cfg.get("url") or cfg.get("path") or ""))
+    result: dict[str, Any] = {
+        "backend": cfg["backend"],
+        "url": display_url,
+        "capabilities": caps,
+        "ping": ping,
+        **extras,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if ping.get("connected") else 1
+
+    print("=" * 60)
+    print("ROSClaw Storage Status")
+    print("=" * 60)
+    print(f"  Backend:      {cfg['backend']}")
+    print(f"  URL/Path:     {display_url}")
+    print("  Capabilities:")
+    for name, value in caps.items():
+        print(f"    {name}: {value}")
+    print("  Ping:")
+    print(f"    connected:  {ping.get('connected')}")
+    if ping.get("latency_ms") is not None:
+        print(f"    latency_ms: {ping['latency_ms']}")
+    if ping.get("wal_size_mb") is not None:
+        print(f"    wal_size_mb: {ping['wal_size_mb']}")
+    if ping.get("error"):
+        print(f"    error:      {ping['error']}")
+    if extras.get("migrations"):
+        mig = extras["migrations"]
+        print("  Migrations:")
+        print(f"    pending:    {mig.get('pending')}")
+    if extras.get("outbox"):
+        ob = extras["outbox"]
+        print("  Outbox:")
+        print(f"    total:      {ob.get('total')}")
+        print(f"    pending:    {ob.get('pending')}")
+    if extras.get("vector"):
+        vec = extras["vector"]
+        print("  Vector:")
+        print(f"    enabled:    {vec.get('enabled')}")
+        print(f"    warmed:     {vec.get('warmed')}")
+    if extras.get("practice"):
+        prac = extras["practice"]
+        print("  Practice:")
+        print(f"    catalog:    {prac.get('catalog_exists')}")
+        if "practices" in prac:
+            print(f"    practices:  {prac['practices']}")
+        if prac.get("latest_session"):
+            ls = prac["latest_session"]
+            print(f"    latest:     {ls.get('name')} events={ls.get('events_jsonl_lines')}")
+    print("=" * 60)
+    return 0 if ping.get("connected") else 1
+
+
+def _versioned_dimension_faults(dimensions: dict[str, Any]) -> dict[str, tuple[Any, int]]:
+    """Collections whose actual vector dimension contradicts the embedding
+    profile encoded in their versioned name (``<logical>__<profile>__<analyzer>``).
+
+    Mixed dimensions ACROSS profiles are by design (PR-SDB-2/MEM-5); only a
+    mismatch with the collection's own declared profile is a fault.  Legacy
+    (non-versioned) collections carry no per-collection expectation.
+    """
+    from rosclaw.embedding.profile import PROFILES
+
+    faults: dict[str, tuple[Any, int]] = {}
+    for name, dim in dimensions.items():
+        if dim is None:
+            continue
+        parts = str(name).split("__")
+        if len(parts) < 3:
+            continue
+        profile = PROFILES.get(parts[1])
+        if profile is not None and dim != profile.dimension:
+            faults[str(name)] = (dim, profile.dimension)
+    return faults
+
+
+def _native_seekdb_checks(
+    client: Any,
+    backend: str,
+    args: argparse.Namespace,
+    checks: list[tuple[str, str, bool]],
+    issues: list[str],
+    result: dict[str, Any],
+) -> None:
+    """Doctor checks for native SeekDB backends (embedded / server).
+
+    Covers the P0 acceptance set: engine readiness, collections, embedder
+    model + dimension, per-collection counts, restart persistence (embedded),
+    and DSN/auth disclosure (server).
+    """
+    import time
+
+    deployment = client.deployment_info()
+    result["seekdb"] = {"backend": backend, "deployment": deployment}
+
+    # 1. Engine readiness: the store's connect() already probes with a 30 s
+    # deadline; time a live catalog round-trip as the observable probe.
+    t0 = time.perf_counter()
+    try:
+        collections = client.list_collections()
+        ready_ms = round((time.perf_counter() - t0) * 1000, 1)
+        checks.append(("engine ready", f"catalog probe {ready_ms} ms", True))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("engine ready", f"catalog probe failed: {exc}", False))
+        issues.append(f"SeekDB engine not ready: {exc}")
+        return
+
+    # 2. Collections + 3. counts + 4. embedder model/dimension
+    checks.append(("collections", f"{len(collections)} present", True))
+    counts: dict[str, int] = {}
+    dimensions: dict[str, Any] = {}
+    models: dict[str, Any] = {}
+    for name in collections:
+        try:
+            counts[name] = client.count(name)
+        except Exception as exc:  # noqa: BLE001
+            counts[name] = -1
+            issues.append(f"count({name}) failed: {exc}")
+        try:
+            info = client.embedding_info(name)
+            dimensions[name] = info.get("dimension")
+            models[name] = info.get("model_name") or info.get("embedder_type")
+        except Exception as exc:  # noqa: BLE001
+            dimensions[name] = None
+            models[name] = None
+            issues.append(f"embedding_info({name}) failed: {exc}")
+        # Versioned collections carry their profile in the name; the store's
+        # global embedder label is stale for them (PR-SDB-2).
+        parts = name.split("__")
+        if len(parts) >= 3:
+            from rosclaw.embedding.profile import PROFILES
+
+            profile = PROFILES.get(parts[1])
+            if profile is not None:
+                models[name] = profile.profile_id
+    result["seekdb"]["collections"] = {
+        name: {
+            "count": counts.get(name),
+            "dimension": dimensions.get(name),
+            "embedder": models.get(name),
+        }
+        for name in collections
+    }
+    dim_set = {d for d in dimensions.values() if d is not None}
+    # Versioned physical collections (<logical>__<profile>__<analyzer>) are
+    # validated against their declared embedding profile — mixed dimensions
+    # ACROSS profiles are by design (PR-SDB-2/MEM-5); only a mismatch with
+    # the collection's own profile, or with the ACTIVE descriptor, is a fault.
+    mismatched = _versioned_dimension_faults(dimensions)
+    active_dim_fault: str | None = None
+    try:
+        from rosclaw.memory.v2.runtime_retrieval.active_resolver import (
+            ActiveCollectionResolver,
+        )
+
+        descriptor = ActiveCollectionResolver(client).resolve("memory_items")
+        active_dim = dimensions.get(descriptor.physical_collection)
+        if active_dim is not None and active_dim != descriptor.dimension:
+            active_dim_fault = (
+                f"ACTIVE {descriptor.physical_collection} dim {active_dim} "
+                f"!= descriptor {descriptor.dimension}"
+            )
+    except Exception:  # noqa: BLE001 - no ACTIVE pointer is a state, not a fault
+        descriptor = None
+    dim_ok = not mismatched and active_dim_fault is None
+    checks.append(
+        (
+            "vector dimension",
+            f"{sorted(dim_set) if dim_set else 'n/a'} across {len(dimensions)} collections"
+            + ("" if dim_ok else f" mismatched={mismatched}"),
+            dim_ok,
+        )
+    )
+    for name, (dim, expected) in mismatched.items():
+        issues.append(f"Collection {name} dimension {dim} != profile dimension {expected}")
+    if active_dim_fault:
+        issues.append(active_dim_fault)
+    model_set = {m for m in models.values() if m}
+    checks.append(
+        (
+            "embedder model",
+            ", ".join(sorted(model_set)) if model_set else "n/a",
+            bool(model_set) or not collections,
+        )
+    )
+    if collections and not model_set:
+        issues.append("No embedder model reported for any collection.")
+    total = sum(c for c in counts.values() if c > 0)
+    checks.append(("collection counts", f"{total} records total", True))
+
+    # 5a. Restart persistence (embedded): disconnect + reconnect must see the
+    # same collections — proves the on-disk engine state survives a restart.
+    if deployment["mode"] == "embedded":
+        path = deployment.get("path")
+        try:
+            client.disconnect()
+            client.connect()
+            after = client.list_collections()
+            persisted = set(after) >= set(collections)
+            checks.append(
+                (
+                    "restart persistence",
+                    f"{len(after)}/{len(collections)} collections after reopen at {path}",
+                    persisted,
+                )
+            )
+            if not persisted:
+                issues.append(
+                    f"Embedded engine lost collections across reopen: "
+                    f"{sorted(set(collections) - set(after))}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            checks.append(("restart persistence", f"reopen failed: {exc}", False))
+            issues.append(f"Embedded engine reopen failed: {exc}")
+
+    # 5b. DSN/auth (server): successful connect + catalog listing already
+    # proves auth; disclose the DSN with password redacted.
+    if deployment["mode"] == "server":
+        dsn = f"{deployment.get('user')}@{deployment.get('host')}:{deployment.get('port')}/{deployment.get('database')}"
+        checks.append(("dsn auth", f"authenticated as {dsn}", True))
+        result["seekdb"]["dsn"] = dsn
+
+
+@_with_stdout_flush
+def cmd_db_doctor(args: argparse.Namespace) -> int:
+    """Run storage health checks and optionally apply safe fixes."""
+    cfg = _load_storage_config(args)
+    issues: list[str] = []
+    checks: list[tuple[str, str, bool]] = []
+    fixes: list[str] = []
+    result: dict[str, Any] = {"checks": [], "issues": [], "fixes": []}
+
+    # 1. Config presence
+    config_ok = cfg["config_found"]
+    config_overridden = cfg["config_overridden"]
+    checks.append(
+        (
+            "rosclaw.yaml",
+            "found" if config_ok else ("overridden by CLI" if config_overridden else "missing"),
+            config_ok or config_overridden,
+        )
+    )
+    if not config_ok and not config_overridden:
+        issues.append("No rosclaw.yaml found; using defaults.")
+
+    # 2. Backend resolution and URL sanity
+    backend = cfg["backend"]
+    url = cfg["url"]
+    resolved_ok = backend in {"memory", "sqlite", "mysql"} | _NATIVE_SEEKDB_BACKENDS
+    checks.append(("backend", backend, resolved_ok))
+    if not resolved_ok:
+        issues.append(f"Unknown backend '{backend}'.")
+
+    if (
+        backend in {"sqlite", "mysql"}
+        and url
+        and str(url).lower().startswith(("http://", "https://"))
+    ):
+        issues.append(
+            f"{backend} backend configured but seekdb_url looks like HTTP ({url}). "
+            "Use ROSCLAW_PRACTICE_HTTP_ADAPTER_URL for the HTTP bridge."
+        )
+
+    # 3. Connection + ping
+    client = None
+    ping: dict[str, Any] = {"connected": False, "error": None}
+    try:
+        client = _create_client(cfg)
+        ping = StorageFactory.ping(client)
+    except Exception as exc:  # noqa: BLE001
+        ping["error"] = str(exc)
+    finally:
+        if client is None:
+            issues.append(f"Cannot create storage client: {ping['error']}")
+
+    checks.append(
+        (
+            "connect",
+            "ok" if ping.get("connected") else ping.get("error") or "failed",
+            ping.get("connected", False),
+        )
+    )
+    if not ping.get("connected"):
+        issues.append(f"Storage ping failed: {ping.get('error')}")
+
+    # 4. Backend-specific checks
+    tables: list[str] = []
+    pragmas: dict[str, Any] = {}
+    if client is not None and backend == "sqlite":
+        try:
+            connection = client._connection
+            pragmas = _sqlite_pragmas(connection)
+            tables = _sqlite_table_names(connection)
+            checks.append(
+                (
+                    "journal_mode",
+                    str(pragmas.get("journal_mode")),
+                    pragmas.get("journal_mode") == "wal",
+                )
+            )
+            if pragmas.get("journal_mode") != "wal":
+                issues.append("SQLite journal_mode is not WAL.")
+                if args.fix:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    fixes.append("Set SQLite journal_mode=WAL.")
+                    pragmas["journal_mode"] = "wal"
+            checks.append(
+                (
+                    "busy_timeout",
+                    str(pragmas.get("busy_timeout")),
+                    bool(pragmas.get("busy_timeout")),
+                )
+            )
+            if not pragmas.get("busy_timeout"):
+                issues.append("SQLite busy_timeout is not set.")
+                if args.fix:
+                    connection.execute("PRAGMA busy_timeout=5000")
+                    fixes.append("Set SQLite busy_timeout=5000.")
+                    pragmas["busy_timeout"] = 5000
+            wal_size = _sqlite_wal_size(cfg["path"])
+            wal_ok = wal_size < 100 * 1024 * 1024
+            checks.append(("wal_size", f"{wal_size / (1024 * 1024):.2f} MB", wal_ok))
+            if not wal_ok:
+                issues.append("SQLite WAL is larger than 100 MB.")
+                if args.fix:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    fixes.append("Ran PRAGMA wal_checkpoint(TRUNCATE).")
+            db_size = Path(cfg["path"]).stat().st_size
+            size_ok = db_size < 2 * 1024 * 1024 * 1024
+            checks.append(("db_size", f"{db_size / (1024 * 1024):.2f} MB", size_ok))
+            if not size_ok:
+                issues.append("SQLite database is larger than 2 GB.")
+
+            # Vector-store checks for SQLite.
+            vec = _vector_status(client)
+            checks.append(("vector", "enabled" if vec["enabled"] else "disabled", True))
+            if vec.get("enabled"):
+                warmed = vec.get("warmed", False)
+                if not warmed and args.fix:
+                    try:
+                        client.warmup_embedder()
+                        warmed = True
+                        fixes.append("Warmed vector embedder.")
+                    except Exception as warmup_exc:  # noqa: BLE001
+                        issues.append(f"Vector warmup failed: {warmup_exc}")
+                checks.append(("vector warmup", "warmed" if warmed else "not warmed", warmed))
+                if not warmed:
+                    issues.append("Vector store is enabled but embedder is not warmed.")
+        except Exception as exc:  # noqa: BLE001
+            issues.append(f"SQLite introspection failed: {exc}")
+
+    if client is not None and backend == "mysql":
+        try:
+            with client._connection as connection:
+                tables = _mysql_table_names(connection)
+        except Exception as exc:  # noqa: BLE001
+            issues.append(f"MySQL table listing failed: {exc}")
+
+    if client is not None and backend in _NATIVE_SEEKDB_BACKENDS:
+        _native_seekdb_checks(client, backend, args, checks, issues, result)
+
+    # 5. Schema migrations
+    if client is not None and backend in {"sqlite", "mysql"}:
+        try:
+            runner = MigrationRunner()
+            if backend == "sqlite":
+                pending = runner.pending(client._connection, backend)
+            else:
+                with client._connection as connection:
+                    pending = runner.pending(connection, backend)
+
+            if args.fix:
+                if backend == "mysql":
+                    with client._connection as connection:
+                        applied = runner.apply(connection, backend)
+                else:
+                    applied = runner.apply(client._connection, backend)
+                # Recompute pending after applying so the check reflects the
+                # post-fix state rather than the pre-fix count.
+                if backend == "mysql":
+                    with client._connection as connection:
+                        pending_after = runner.pending(connection, backend)
+                else:
+                    pending_after = runner.pending(client._connection, backend)
+                checks.append(
+                    (
+                        "migrations",
+                        f"{len(applied)} applied / {len(pending_after)} pending",
+                        len(pending_after) == 0,
+                    )
+                )
+                fixes.extend(f"Applied migration {v}." for v in applied)
+                if pending_after:
+                    issues.append(f"Pending migrations after fix: {pending_after}")
+            else:
+                checks.append(("migrations", f"{len(pending)} pending", len(pending) == 0))
+                if pending:
+                    issues.append(f"Pending migrations: {pending}")
+        except Exception as exc:  # noqa: BLE001
+            issues.append(f"Migration check failed: {exc}")
+            checks.append(("migrations", "failed", False))
+
+    checks.append(
+        (
+            "schema_migrations table",
+            "present"
+            if "schema_migrations" in tables
+            else (
+                "n/a" if backend == "memory" or backend in _NATIVE_SEEKDB_BACKENDS else "missing"
+            ),
+            "schema_migrations" in tables
+            or backend == "memory"
+            or backend in _NATIVE_SEEKDB_BACKENDS,
+        )
+    )
+    if (
+        "schema_migrations" not in tables
+        and backend != "memory"
+        and backend not in _NATIVE_SEEKDB_BACKENDS
+    ):
+        issues.append("schema_migrations table is missing.")
+
+    # 6. Outbox check
+    if cfg["outbox_enabled"]:
+        try:
+            outbox = OutboxStore(db_path=cfg["outbox_path"])
+            stats = outbox.stats()
+            outbox.close()
+            oldest_sec = stats.get("oldest_pending_sec")
+            oldest_str = f"oldest={oldest_sec}s" if oldest_sec is not None else "oldest=n/a"
+            checks.append(
+                (
+                    "outbox",
+                    f"{stats['total']} total / {stats['pending']} pending / {stats.get('dead_letters', 0)} dead ({oldest_str})",
+                    True,
+                )
+            )
+            if stats["failed"]:
+                issues.append(f"Outbox has {stats['failed']} failed records.")
+            if stats.get("dead_letters"):
+                issues.append(f"Outbox has {stats['dead_letters']} dead-letter records.")
+            result["outbox"] = stats
+        except Exception as exc:  # noqa: BLE001
+            issues.append(f"Outbox check failed: {exc}")
+            checks.append(("outbox", "failed", False))
+
+    # 7. Practice catalog check
+    catalog_path = _practice_catalog_path(cfg["practice_data_root"])
+    if catalog_path.exists():
+        try:
+            catalog_conn = sqlite3.connect(str(catalog_path), check_same_thread=False)
+            catalog_conn.row_factory = sqlite3.Row
+            count = catalog_conn.execute("SELECT COUNT(*) FROM practices").fetchone()[0]
+            catalog_conn.close()
+            checks.append(("practice catalog", f"{count} practices", True))
+            result["practice_catalog"] = {"path": str(catalog_path), "practices": count}
+        except Exception as exc:  # noqa: BLE001
+            issues.append(f"Practice catalog check failed: {exc}")
+            checks.append(("practice catalog", "failed", False))
+    else:
+        checks.append(("practice catalog", "not found (no sessions yet)", True))
+
+    # 8. Latest practice session consistency
+    latest_session_dir = _latest_session_dir(cfg["practice_data_root"])
+    if latest_session_dir is not None:
+        try:
+            event_count, events_lines, consistent, timeline_exists = _session_event_consistency(
+                latest_session_dir
+            )
+            checks.append(
+                (
+                    "latest session events",
+                    f"{events_lines} lines / episode.event_count={event_count}",
+                    consistent,
+                )
+            )
+            if not consistent:
+                issues.append(
+                    f"Latest session {latest_session_dir.name} event_count "
+                    f"({event_count}) != events.jsonl lines ({events_lines})."
+                )
+            timeline_ok = not timeline_exists
+            checks.append(
+                (
+                    "latest session timeline",
+                    "present" if timeline_exists else "absent",
+                    timeline_ok,
+                )
+            )
+            if timeline_exists:
+                issues.append(f"Latest session {latest_session_dir.name} still has timeline.jsonl.")
+            result["latest_session"] = {
+                "path": str(latest_session_dir),
+                "event_count": event_count,
+                "events_jsonl_lines": events_lines,
+                "timeline_exists": timeline_exists,
+            }
+        except Exception as exc:  # noqa: BLE001
+            issues.append(f"Latest session consistency check failed: {exc}")
+
+    if client is not None:
+        _close_client(client)
+
+    result["checks"] = [{"name": n, "value": v, "ok": ok} for n, v, ok in checks]
+    result["issues"] = issues
+    result["fixes"] = fixes
+    exit_code = 0 if not issues else 1
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return exit_code
+
+    print("=" * 60)
+    print("ROSClaw Storage Doctor")
+    print("=" * 60)
+    for name, value, ok in checks:
+        icon = "✅" if ok else "❌"
+        print(f"  {icon} {name:<30} {value}")
+    print("=" * 60)
+    if fixes:
+        print(f"\n🔧 Fixes applied ({len(fixes)}):")
+        for fx in fixes:
+            print(f"  • {fx}")
+    if issues:
+        print(f"\n⚠️  Issues found ({len(issues)}):")
+        for i, issue in enumerate(issues, 1):
+            print(f"  {i}. {issue}")
+        return 1
+    print("\n✅ All storage checks passed.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# rosclaw db reconcile
+# ---------------------------------------------------------------------------
+
+
+def _id_set_hash(ids: set[str]) -> str:
+    """SHA-256 over the sorted event-id set (order-independent)."""
+    digest = hashlib.sha256()
+    for event_id in sorted(ids):
+        digest.update(event_id.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _jsonl_event_stats(events_path: Path) -> dict[str, Any]:
+    """Stream events.jsonl: line count, duplicate ids, and the event-id set."""
+    count = 0
+    duplicates = 0
+    parse_errors = 0
+    ids: set[str] = set()
+    if not events_path.exists():
+        return {"count": 0, "duplicates": 0, "parse_errors": 0, "ids": ids, "exists": False}
+    with events_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            count += 1
+            try:
+                event_id = json.loads(line).get("event_id")
+            except json.JSONDecodeError:
+                parse_errors += 1
+                continue
+            if not event_id:
+                parse_errors += 1
+                continue
+            if event_id in ids:
+                duplicates += 1
+            else:
+                ids.add(event_id)
+    return {
+        "count": count,
+        "duplicates": duplicates,
+        "parse_errors": parse_errors,
+        "ids": ids,
+        "exists": True,
+    }
+
+
+def _manifest_event_count(session_dir: Path) -> int | None:
+    manifest_path = session_dir / "manifest.yaml"
+    if not manifest_path.exists():
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            value = data.get("event_count")
+            return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _episode_event_count(session_dir: Path) -> int | None:
+    episode_path = session_dir / "episode.json"
+    if not episode_path.exists():
+        return None
+    try:
+        value = json.loads(episode_path.read_text(encoding="utf-8")).get("event_count")
+        return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _remote_counts(client: Any, practice_id: str) -> dict[str, Any]:
+    """Best-effort remote episode/memory counts for *practice_id*."""
+    result: dict[str, Any] = {"remote_episode": None, "remote_memories": None}
+    try:
+        result["remote_episode"] = client.count("episodes", {"practice_id": practice_id})
+    except Exception as exc:  # noqa: BLE001
+        result["remote_episode_error"] = str(exc)
+    try:
+        result["remote_memories"] = client.count("body_cognition", {"practice_id": practice_id})
+    except Exception as exc:  # noqa: BLE001
+        result["remote_memories_error"] = str(exc)
+    return result
+
+
+def reconcile_practice(
+    practice_id: str,
+    data_root: str,
+    *,
+    remote_client: Any | None = None,
+    max_missing: int = 20,
+) -> dict[str, Any]:
+    """Reconcile one practice session across JSONL, catalog, index, and manifest."""
+    root = Path(data_root)
+    session_dir = root / "sessions" / practice_id
+    events_path = session_dir / "raw" / "events.jsonl"
+
+    jsonl = _jsonl_event_stats(events_path)
+    manifest_count = _manifest_event_count(session_dir)
+    episode_count = _episode_event_count(session_dir)
+
+    report: dict[str, Any] = {
+        "practice_id": practice_id,
+        "session_dir": str(session_dir),
+        "raw_jsonl": jsonl["count"],
+        "catalog_events": None,
+        "event_index": None,
+        "manifest_event_count": manifest_count,
+        "episode_event_count": episode_count,
+        "duplicates": jsonl["duplicates"],
+        "parse_errors": jsonl["parse_errors"],
+        "missing": [],
+        "missing_in_index": [],
+        "hashes": {},
+        "passed": False,
+    }
+    if not jsonl["exists"]:
+        report["error"] = "events.jsonl not found"
+        return report
+
+    catalog_path = _practice_catalog_path(data_root)
+    catalog_ids: set[str] = set()
+    index_ids: set[str] = set()
+    if catalog_path.exists():
+        conn = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT event_id FROM events WHERE practice_id = ?", (practice_id,)
+            ).fetchall()
+            catalog_ids = {row[0] for row in rows if row[0]}
+            practice_row = conn.execute(
+                "SELECT session_id, episode_id FROM practices WHERE practice_id = ?",
+                (practice_id,),
+            ).fetchone()
+            if practice_row and (practice_row[0] or practice_row[1]):
+                if practice_row[1]:
+                    idx_rows = conn.execute(
+                        "SELECT event_id FROM practice_event_index WHERE episode_id = ?",
+                        (practice_row[1],),
+                    ).fetchall()
+                else:
+                    idx_rows = conn.execute(
+                        "SELECT event_id FROM practice_event_index WHERE session_id = ?",
+                        (practice_row[0],),
+                    ).fetchall()
+                index_ids = {row[0] for row in idx_rows if row[0]}
+        finally:
+            conn.close()
+    else:
+        report["error"] = f"catalog not found at {catalog_path}"
+        return report
+
+    report["catalog_events"] = len(catalog_ids)
+    report["event_index"] = len(index_ids)
+
+    jsonl_ids: set[str] = jsonl["ids"]
+    missing_in_catalog = jsonl_ids - catalog_ids
+    missing_in_index = jsonl_ids - index_ids
+    report["missing"] = sorted(missing_in_catalog)[:max_missing]
+    report["missing_in_index"] = sorted(missing_in_index)[:max_missing]
+    report["missing_count"] = len(missing_in_catalog)
+    report["missing_in_index_count"] = len(missing_in_index)
+
+    report["hashes"] = {
+        "jsonl_event_ids": _id_set_hash(jsonl_ids),
+        "catalog_event_ids": _id_set_hash(catalog_ids),
+        "event_index_ids": _id_set_hash(index_ids),
+    }
+    hash_match = (
+        report["hashes"]["jsonl_event_ids"] == report["hashes"]["catalog_event_ids"]
+        and report["hashes"]["jsonl_event_ids"] == report["hashes"]["event_index_ids"]
+    )
+
+    counts_match = (
+        jsonl["count"] == len(catalog_ids) == len(index_ids)
+        and (manifest_count is None or manifest_count == jsonl["count"])
+        and (episode_count is None or episode_count == jsonl["count"])
+    )
+    local_ok = (
+        counts_match and hash_match and jsonl["duplicates"] == 0 and jsonl["parse_errors"] == 0
+    )
+
+    if remote_client is not None:
+        report.update(_remote_counts(remote_client, practice_id))
+        remote_ok = (
+            report.get("remote_episode") is not None
+            and report.get("remote_episode", 0) >= 1
+            and report.get("remote_memories") is not None
+        )
+        report["remote_checked"] = True
+        report["passed"] = bool(local_ok and remote_ok)
+    else:
+        report["remote_checked"] = False
+        report["passed"] = bool(local_ok)
+    return report
+
+
+@_with_stdout_flush
+def cmd_db_reconcile(args: argparse.Namespace) -> int:
+    """Reconcile practice event persistence across all local/remote paths."""
+    cfg = _load_storage_config(args)
+    data_root = getattr(args, "data_root", None) or cfg["practice_data_root"]
+
+    remote_client = None
+    if getattr(args, "remote", False):
+        try:
+            remote_client = _create_client(cfg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[rosclaw db reconcile] Cannot create remote client: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        practice_ids: list[str] = []
+        if getattr(args, "all", False):
+            sessions_root = Path(data_root) / "sessions"
+            if sessions_root.exists():
+                # Only prac_* dirs are practice event sessions; sess_* dirs
+                # are ArtifactStore layout dirs without raw/events.jsonl.
+                practice_ids = sorted(
+                    p.name
+                    for p in sessions_root.iterdir()
+                    if p.is_dir() and p.name.startswith("prac_")
+                )
+        elif getattr(args, "practice_id", None):
+            practice_ids = [args.practice_id]
+        else:
+            latest = _latest_session_dir(data_root)
+            if latest is not None:
+                practice_ids = [latest.name]
+
+        if not practice_ids:
+            print("[rosclaw db reconcile] No practice sessions found", file=sys.stderr)
+            return 1
+
+        reports = [
+            reconcile_practice(
+                pid,
+                data_root,
+                remote_client=remote_client,
+                max_missing=getattr(args, "max_missing", 20),
+            )
+            for pid in practice_ids
+        ]
+    finally:
+        if remote_client is not None:
+            _close_client(remote_client)
+
+    all_passed = all(r["passed"] for r in reports)
+    if getattr(args, "json", False):
+        output: Any = (
+            reports[0]
+            if len(reports) == 1
+            else {
+                "passed": all_passed,
+                "sessions": reports,
+            }
+        )
+        print(json.dumps(output, indent=2))
+    else:
+        for report in reports:
+            icon = "✅" if report["passed"] else "❌"
+            print(f"{icon} {report['practice_id']}")
+            for key in (
+                "raw_jsonl",
+                "catalog_events",
+                "event_index",
+                "manifest_event_count",
+                "episode_event_count",
+                "duplicates",
+                "missing_count",
+                "missing_in_index_count",
+            ):
+                if key in report:
+                    print(f"    {key:<24} {report[key]}")
+            if report.get("remote_checked"):
+                print(f"    {'remote_episode':<24} {report.get('remote_episode')}")
+                print(f"    {'remote_memories':<24} {report.get('remote_memories')}")
+            if report.get("error"):
+                print(f"    error: {report['error']}")
+    return 0 if all_passed else 1
+
+
+def add_db_subparser(subparsers: Any) -> Any:
+    """Add ``rosclaw db`` subcommands."""
+    db_parser = subparsers.add_parser("db", help="Storage backend diagnostics")
+    db_subparsers = db_parser.add_subparsers(dest="db_command")
+
+    status_parser = db_subparsers.add_parser("status", help="Show storage backend status")
+    status_parser.add_argument("--json", action="store_true", help="Output JSON")
+    status_parser.add_argument("--backend", default=None, help="Override backend")
+    status_parser.add_argument("--url", default=None, help="Override SQL URL")
+    status_parser.add_argument("--path", default=None, help="Override SQLite path")
+
+    doctor_parser = db_subparsers.add_parser("doctor", help="Run storage health checks")
+    doctor_parser.add_argument("--json", action="store_true", help="Output JSON")
+    doctor_parser.add_argument("--fix", action="store_true", help="Apply safe fixes")
+    doctor_parser.add_argument("--backend", default=None, help="Override backend")
+    doctor_parser.add_argument("--url", default=None, help="Override SQL URL")
+    doctor_parser.add_argument("--path", default=None, help="Override SQLite path")
+
+    reconcile_parser = db_subparsers.add_parser(
+        "reconcile",
+        help="Verify JSONL/catalog/event-index/manifest event consistency",
+    )
+    reconcile_parser.add_argument("--practice-id", default=None, help="Practice to reconcile")
+    reconcile_parser.add_argument(
+        "--all", action="store_true", help="Reconcile every session in the data root"
+    )
+    reconcile_parser.add_argument(
+        "--data-root", default=None, help="Practice data root (default: from rosclaw.yaml)"
+    )
+    reconcile_parser.add_argument(
+        "--remote", action="store_true", help="Also reconcile against the remote knowledge store"
+    )
+    reconcile_parser.add_argument("--json", action="store_true", help="Output JSON")
+    reconcile_parser.add_argument("--backend", default=None, help="Override backend")
+    reconcile_parser.add_argument("--url", default=None, help="Override SQL URL")
+    reconcile_parser.add_argument("--path", default=None, help="Override SQLite path")
+    reconcile_parser.add_argument(
+        "--max-missing", type=int, default=20, help="Max missing event ids to list"
+    )
+    return db_parser
+
+
+# contextlib is imported lazily here to avoid a top-level dependency on
+# an unused module for the happy path.
+import contextlib  # noqa: E402

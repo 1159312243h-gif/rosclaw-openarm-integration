@@ -1,0 +1,30 @@
+schema_version: e_urdf.safety.v1
+safety_status: strict
+global_policy:
+  real_robot_execution_allowed: false
+  sandbox_required: true
+  low_speed_first_run_required: true
+  current_limit_required: true
+  fault_monitor_required: true
+  manual_enable_required_after_validation: true
+limits:
+  max_joint_speed_scale: 0.2
+  max_joint_torque_scale: 0.2
+  max_position_step_scale: 0.1
+  require_joint_limit_margin: true
+  joint_limit_margin_ratio: 0.1
+runtime_monitors:
+  required:
+    - joint_limit_monitor
+  recommended: []
+trajectory_policy:
+  require_sandbox_validation: true
+  require_self_collision_check: true
+  require_joint_limit_margin: true
+  require_contact_margin_for_thumb_index: false
+  require_incremental_pose_replay: true
+blocked_actions: []
+first_real_robot_protocol:
+  steps:
+    - Verify grip force limits
+    - Run sandbox validation

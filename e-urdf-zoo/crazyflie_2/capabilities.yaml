@@ -1,0 +1,211 @@
+capability_version: '1.0'
+robot_id: crazyflie_2_1
+
+capabilities:
+- id: cf_swarm_flight
+  name: swarm_flight
+  category: aerial
+  description: Coordinated multi-drone swarm flight
+  skill_type: programmed
+  skill_package: crazyflie_swarm
+  inputs:
+  - name: swarm_size
+    type: int
+    default: 4
+    range: [2, 49]
+  - name: formation
+    type: str
+    enum: [line, circle, grid, random, v_shape]
+    default: circle
+  - name: separation
+    type: float
+    default: 0.5
+    unit: m
+    range: [0.2, 2.0]
+  - name: duration
+    type: float
+    default: 60.0
+    unit: s
+  preconditions:
+  - radio_connected
+  - battery_above_20_percent
+  postconditions:
+  - swarm_formed
+  required_sensors:
+  - imu
+  - flow_deck
+  estimated_duration:
+    mean: 60.0
+    std: 10.0
+    unit: s
+  success_metrics:
+  - name: formation_accuracy
+    target: 0.1
+    unit: m
+  - name: collision_free
+    target: true
+  failure_modes:
+  - name: radio_loss
+    symptoms:
+    - communication_timeout
+    recovery: individual_land
+  - name: neighbor_lost
+    symptoms:
+    - drone_out_of_range
+    recovery: reform_formation
+  constraints:
+    max_swarm_size: 49
+    min_inter_drone_distance: 0.3
+
+- id: cf_indoor_navigation
+  name: indoor_navigation
+  category: aerial
+  description: Navigate indoors using flow deck and multi-ranger
+  skill_type: programmed
+  skill_package: crazyflie_navigation
+  inputs:
+  - name: waypoints
+    type: list
+    description: List of local waypoints [x, y, z]
+  - name: speed
+    type: float
+    default: 0.5
+    unit: m/s
+    range: [0.1, 2.0]
+  - name: avoid_walls
+    type: bool
+    default: true
+  preconditions:
+  - flow_deck_active
+  - battery_above_15_percent
+  postconditions:
+  - waypoints_visited
+  required_sensors:
+  - flow_deck
+  - multi_ranger_front
+  - multi_ranger_back
+  - multi_ranger_left
+  - multi_ranger_right
+  estimated_duration:
+    mean: 30.0
+    unit: s
+  success_metrics:
+  - name: position_error
+    target: 0.1
+    unit: m
+  - name: wall_collision_count
+    target: 0
+
+- id: cf_education_demo
+  name: education_demo
+  category: aerial
+  description: Pre-programmed flight demonstrations for education
+  skill_type: programmed
+  skill_package: crazyflie_demo
+  inputs:
+  - name: demo_type
+    type: str
+    enum: [hover, circle, figure8, flip, spiral]
+    default: hover
+  - name: duration
+    type: float
+    default: 10.0
+    unit: s
+    range: [1, 60]
+  - name: amplitude
+    type: float
+    default: 0.5
+    unit: m
+  preconditions:
+  - imu_calibrated
+  - battery_above_20_percent
+  postconditions:
+  - demo_complete
+  required_sensors:
+  - imu
+  - flow_deck
+  estimated_duration:
+    mean: 10.0
+    unit: s
+
+- id: cf_light_show
+  name: light_show
+  category: display
+  description: LED light patterns for visual effects
+  skill_type: programmed
+  skill_package: crazyflie_led
+  inputs:
+  - name: pattern
+    type: str
+    enum: [rainbow, pulse, chase, solid, strobe, fade]
+    default: rainbow
+  - name: color
+    type: str
+    default: "white"
+  - name: speed
+    type: float
+    default: 1.0
+    range: [0.1, 5.0]
+  - name: brightness
+    type: float
+    default: 1.0
+    range: [0, 1]
+  preconditions:
+  - led_deck_attached
+  postconditions:
+  - pattern_displayed
+  required_sensors:
+  - led_deck
+  estimated_duration:
+    mean: 30.0
+    unit: s
+
+skill_registry:
+  crazyflie_swarm:
+    version: '1.0'
+    skills:
+    - swarm_flight
+    - formation_change
+    - leader_follower
+  crazyflie_navigation:
+    version: '1.0'
+    skills:
+    - indoor_navigation
+    - wall_following
+    - obstacle_avoidance
+  crazyflie_demo:
+    version: '1.0'
+    skills:
+    - hover
+    - circle
+    - figure8
+    - flip
+    - spiral
+  crazyflie_led:
+    version: '1.0'
+    skills:
+    - rainbow
+    - pulse
+    - chase
+    - solid
+    - strobe
+
+precondition_checks:
+  radio_connected:
+    check: radio.link_quality > 0.5
+    description: Radio link quality must be above 50%
+  battery_above_20_percent:
+    check: battery.capacity_percent >= 20.0
+    description: Battery must be above 20%
+  battery_above_15_percent:
+    check: battery.capacity_percent >= 15.0
+    description: Battery must be above 15%
+  flow_deck_active:
+    check: sensors.flow_deck.status == ACTIVE
+    description: Flow deck must be active for indoor navigation
+  imu_calibrated:
+    check: sensors.imu.calibrated == true
+    description: IMU must be calibrated
+  led_deck_attached:
+    check: decks.led_deck.attached == true
+    description: LED deck must be attached

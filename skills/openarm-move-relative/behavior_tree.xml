@@ -1,0 +1,13 @@
+<root BTCPP_format="4">
+  <BehaviorTree ID="OpenArmMoveRelative">
+    <Fallback name="fail_closed">
+      <Sequence name="openarm_move_relative_sequence">
+        <CheckRobotReady name="check_robot_ready"/>
+        <SandboxValidate name="precheck_safety"/>
+        <ExecuteSkill name="execute_openarm_move_relative"/>
+        <VerifyOutcome name="verify_outcome"/>
+      </Sequence>
+      <AbortSkill name="stop_without_retry"/>
+    </Fallback>
+  </BehaviorTree>
+</root>

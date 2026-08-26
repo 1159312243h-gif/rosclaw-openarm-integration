@@ -1,0 +1,19 @@
+# Default parameters for openarm-move-relative
+
+motion:
+  reference_frame: world
+  velocity_scale: 0.05
+  acceleration_scale: 0.05
+  max_translation_norm_m: 0.02
+
+verification:
+  max_final_error_m: 0.0005
+  require_mujoco_physics: true
+  require_moveit_cartesian_planning: true
+  require_moveit_execute_trajectory: true
+  require_follow_joint_trajectory: true
+  allow_direct_mujoco_fallback: false
+  require_task_verified_receipt: true
+
+retry:
+  max_attempts: 0

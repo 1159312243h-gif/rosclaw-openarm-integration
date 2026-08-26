@@ -1,0 +1,9 @@
+schema_version=rosclaw.openarm.migration.provenance.v1
+created_at=2026-08-26T10:20:47+08:00
+official_root=/home/hkz/rosclaw_official
+openarm_root=/home/hkz/openarm_rosclaw
+destination=/home/hkz/rosclaw_openarm_integration
+active_model=openarm_dual_mujoco_01
+active_skill=openarm-move-relative
+official_core_overlay=false
+robot_action_executed=false

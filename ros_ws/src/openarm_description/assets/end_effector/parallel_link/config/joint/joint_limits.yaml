@@ -1,0 +1,12 @@
+joint1:
+  limit:
+    lower: 0.0
+    upper: 0.044
+    velocity: 20.943946
+    effort: 9.0
+joint2:
+  limit:
+    lower: 0.0
+    upper: 0.044
+    velocity: 20.943946
+    effort: 9.0

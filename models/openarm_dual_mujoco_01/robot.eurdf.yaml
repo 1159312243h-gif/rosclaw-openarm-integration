@@ -1,0 +1,726 @@
+robot_id: openarm_dual_mujoco_01
+name: OpenArm Dual MuJoCo
+vendor: OpenArm
+version: 1.0.0
+description: Dual 7-DOF OpenArm model with grippers and a ROSClaw MuJoCo simulation
+  profile.
+dof: 16
+links:
+- name: world
+  type: world
+- name: openarm_body_link0
+  type: base
+  mass: 13.89
+- name: openarm_left_base_link
+  type: link
+  mass: 1.1432284943239561
+- name: openarm_left_link1
+  type: link
+  mass: 1.1416684646202298
+- name: openarm_left_link2
+  type: link
+  mass: 0.2775092746011571
+- name: openarm_left_link3
+  type: link
+  mass: 1.073863338202347
+- name: openarm_left_link4
+  type: link
+  mass: 0.6348534566833373
+- name: openarm_left_link5
+  type: link
+  mass: 0.6156588026168502
+- name: openarm_left_link6
+  type: link
+  mass: 0.475202773187987
+- name: openarm_left_ee_base_link
+  type: end_effector_mount
+  mass: 0.127
+- name: openarm_left_ee_link1
+  type: gripper_finger
+  mass: 0.03602545343277134
+- name: openarm_left_ee_link2
+  type: gripper_finger
+  mass: 0.03602545343277134
+- name: openarm_right_base_link
+  type: link
+  mass: 1.1432284943239561
+- name: openarm_right_link1
+  type: link
+  mass: 1.1416684646202298
+- name: openarm_right_link2
+  type: link
+  mass: 0.2775092746011571
+- name: openarm_right_link3
+  type: link
+  mass: 1.073863338202347
+- name: openarm_right_link4
+  type: link
+  mass: 0.6348534566833373
+- name: openarm_right_link5
+  type: link
+  mass: 0.6156588026168502
+- name: openarm_right_link6
+  type: link
+  mass: 0.475202773187987
+- name: openarm_right_ee_base_link
+  type: end_effector_mount
+  mass: 0.127
+- name: openarm_right_ee_link1
+  type: gripper_finger
+  mass: 0.03602545343277134
+- name: openarm_right_ee_link2
+  type: gripper_finger
+  mass: 0.03602545343277134
+joints:
+- name: openarm_body_link0_mount_joint
+  type: fixed
+  parent: world
+  child: openarm_body_link0
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_base_link_mount_joint
+  type: fixed
+  parent: openarm_body_link0
+  child: openarm_left_base_link
+  origin:
+    xyz:
+    - 0.0
+    - 0.031
+    - 0.698
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint1
+  type: revolute
+  parent: openarm_left_base_link
+  child: openarm_left_link1
+  axis:
+  - 0.0
+  - 1.0
+  - 0.0
+  limits:
+    effort: 40.0
+    lower: -3.4907
+    upper: 1.3963
+    velocity: 16.755
+  origin:
+    xyz:
+    - 0.0
+    - 0.0625
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint2
+  type: revolute
+  parent: openarm_left_link1
+  child: openarm_left_link2
+  axis:
+  - -1.0
+  - 0.0
+  - 0.0
+  limits:
+    effort: 40.0
+    lower: -3.3161
+    upper: 0.17453
+    velocity: 16.755
+  origin:
+    xyz:
+    - 0.0
+    - 0.0600000000000001
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint3
+  type: revolute
+  parent: openarm_left_link2
+  child: openarm_left_link3
+  axis:
+  - 0.0
+  - 0.0
+  - -1.0
+  limits:
+    effort: 27.0
+    lower: -1.5708
+    upper: 1.5708
+    velocity: 5.4454
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - -0.0662500000000008
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint4
+  type: revolute
+  parent: openarm_left_link3
+  child: openarm_left_link4
+  axis:
+  - 0.0
+  - -1.0
+  - 0.0
+  limits:
+    effort: 27.0
+    lower: 0.0
+    upper: 2.4435
+    velocity: 5.4454
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - -0.15375
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint5
+  type: revolute
+  parent: openarm_left_link4
+  child: openarm_left_link5
+  axis:
+  - 0.0
+  - 0.0
+  - -1.0
+  limits:
+    effort: 7.0
+    lower: -1.5708
+    upper: 1.5708
+    velocity: 20.944
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - -0.0955000000000005
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint6
+  type: revolute
+  parent: openarm_left_link5
+  child: openarm_left_link6
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+  limits:
+    effort: 7.0
+    lower: -0.7854
+    upper: 0.7854
+    velocity: 20.944
+  origin:
+    xyz:
+    - 0.0375
+    - 0.0
+    - -0.1205
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_joint7
+  type: revolute
+  parent: openarm_left_link6
+  child: openarm_left_ee_base_link
+  axis:
+  - 0.0
+  - 1.0
+  - 0.0
+  limits:
+    effort: 7.0
+    lower: -0.7854
+    upper: 0.7854
+    velocity: 20.944
+  origin:
+    xyz:
+    - -0.0375
+    - 0.0
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_left_finger_joint1
+  type: prismatic
+  parent: openarm_left_ee_base_link
+  child: openarm_left_ee_link1
+  axis:
+  - 0.0
+  - 1.0
+  - 0.0
+  limits:
+    effort: 9.0
+    lower: 0.0
+    upper: 0.044
+    velocity: 20.943946
+  origin:
+    xyz:
+    - 0.0
+    - 0.033462730717666485
+    - -0.1025
+    rpy:
+    - 3.141592653589793
+    - -0.0
+    - 0.0
+- name: openarm_left_finger_joint2
+  type: prismatic
+  parent: openarm_left_ee_base_link
+  child: openarm_left_ee_link2
+  axis:
+  - 0.0
+  - -1.0
+  - 0.0
+  limits:
+    effort: 9.0
+    lower: 0.0
+    upper: 0.044
+    velocity: 20.943946
+  origin:
+    xyz:
+    - 0.0
+    - -0.03346273071766651
+    - -0.1025
+    rpy:
+    - 3.141592653589793
+    - -0.0
+    - 0.0
+  mimic:
+    joint: openarm_left_finger_joint1
+    multiplier: 1.0
+    offset: 0.0
+- name: openarm_right_base_link_mount_joint
+  type: fixed
+  parent: openarm_body_link0
+  child: openarm_right_base_link
+  origin:
+    xyz:
+    - 0.0
+    - -0.031
+    - 0.698
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint1
+  type: revolute
+  parent: openarm_right_base_link
+  child: openarm_right_link1
+  axis:
+  - 0.0
+  - -1.0
+  - 0.0
+  limits:
+    effort: 40.0
+    lower: -1.3963
+    upper: 3.4907
+    velocity: 16.755
+  origin:
+    xyz:
+    - 0.0
+    - -0.0625
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint2
+  type: revolute
+  parent: openarm_right_link1
+  child: openarm_right_link2
+  axis:
+  - -1.0
+  - 0.0
+  - 0.0
+  limits:
+    effort: 40.0
+    lower: -0.17453
+    upper: 3.3161
+    velocity: 16.755
+  origin:
+    xyz:
+    - 0.0
+    - -0.0600000000000001
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint3
+  type: revolute
+  parent: openarm_right_link2
+  child: openarm_right_link3
+  axis:
+  - 0.0
+  - 0.0
+  - -1.0
+  limits:
+    effort: 27.0
+    lower: -1.5708
+    upper: 1.5708
+    velocity: 5.4454
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - -0.0662500000000008
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint4
+  type: revolute
+  parent: openarm_right_link3
+  child: openarm_right_link4
+  axis:
+  - 0.0
+  - -1.0
+  - 0.0
+  limits:
+    effort: 27.0
+    lower: 0.0
+    upper: 2.4435
+    velocity: 5.4454
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - -0.15375
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint5
+  type: revolute
+  parent: openarm_right_link4
+  child: openarm_right_link5
+  axis:
+  - 0.0
+  - 0.0
+  - -1.0
+  limits:
+    effort: 7.0
+    lower: -1.5708
+    upper: 1.5708
+    velocity: 20.944
+  origin:
+    xyz:
+    - 0.0
+    - 0.0
+    - -0.0955000000000005
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint6
+  type: revolute
+  parent: openarm_right_link5
+  child: openarm_right_link6
+  axis:
+  - 1.0
+  - 0.0
+  - 0.0
+  limits:
+    effort: 7.0
+    lower: -0.7854
+    upper: 0.7854
+    velocity: 20.944
+  origin:
+    xyz:
+    - 0.0375
+    - 0.0
+    - -0.1205
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_joint7
+  type: revolute
+  parent: openarm_right_link6
+  child: openarm_right_ee_base_link
+  axis:
+  - 0.0
+  - -1.0
+  - 0.0
+  limits:
+    effort: 7.0
+    lower: -0.7854
+    upper: 0.7854
+    velocity: 20.944
+  origin:
+    xyz:
+    - -0.0375
+    - 0.0
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+- name: openarm_right_finger_joint1
+  type: prismatic
+  parent: openarm_right_ee_base_link
+  child: openarm_right_ee_link1
+  axis:
+  - 0.0
+  - 1.0
+  - 0.0
+  limits:
+    effort: 9.0
+    lower: 0.0
+    upper: 0.044
+    velocity: 20.943946
+  origin:
+    xyz:
+    - 0.0
+    - 0.033462730717666485
+    - -0.1025
+    rpy:
+    - 3.141592653589793
+    - -0.0
+    - 0.0
+- name: openarm_right_finger_joint2
+  type: prismatic
+  parent: openarm_right_ee_base_link
+  child: openarm_right_ee_link2
+  axis:
+  - 0.0
+  - -1.0
+  - 0.0
+  limits:
+    effort: 9.0
+    lower: 0.0
+    upper: 0.044
+    velocity: 20.943946
+  origin:
+    xyz:
+    - 0.0
+    - -0.03346273071766651
+    - -0.1025
+    rpy:
+    - 3.141592653589793
+    - -0.0
+    - 0.0
+  mimic:
+    joint: openarm_right_finger_joint1
+    multiplier: 1.0
+    offset: 0.0
+sensors:
+- name: joint_state_feedback
+  type: joint_state
+  parent_link: openarm_body_link0
+  topic: /joint_states
+actuators:
+- name: left_arm
+  type: actuator_group
+  joints:
+  - openarm_left_joint1
+  - openarm_left_joint2
+  - openarm_left_joint3
+  - openarm_left_joint4
+  - openarm_left_joint5
+  - openarm_left_joint6
+  - openarm_left_joint7
+- name: right_arm
+  type: actuator_group
+  joints:
+  - openarm_right_joint1
+  - openarm_right_joint2
+  - openarm_right_joint3
+  - openarm_right_joint4
+  - openarm_right_joint5
+  - openarm_right_joint6
+  - openarm_right_joint7
+- name: left_gripper
+  type: actuator_group
+  joints:
+  - openarm_left_finger_joint1
+  - openarm_left_finger_joint2
+- name: right_gripper
+  type: actuator_group
+  joints:
+  - openarm_right_finger_joint1
+  - openarm_right_finger_joint2
+safety_limits:
+  joint_limits:
+    openarm_left_joint1:
+      lower: -3.4907
+      upper: 1.3963
+    openarm_left_joint2:
+      lower: -3.3161
+      upper: 0.17453
+    openarm_left_joint3:
+      lower: -1.5708
+      upper: 1.5708
+    openarm_left_joint4:
+      lower: 0.0
+      upper: 2.4435
+    openarm_left_joint5:
+      lower: -1.5708
+      upper: 1.5708
+    openarm_left_joint6:
+      lower: -0.7854
+      upper: 0.7854
+    openarm_left_joint7:
+      lower: -0.7854
+      upper: 0.7854
+    openarm_left_finger_joint1:
+      lower: 0.0
+      upper: 0.044
+    openarm_left_finger_joint2:
+      lower: 0.0
+      upper: 0.044
+    openarm_right_joint1:
+      lower: -1.3963
+      upper: 3.4907
+    openarm_right_joint2:
+      lower: -0.17453
+      upper: 3.3161
+    openarm_right_joint3:
+      lower: -1.5708
+      upper: 1.5708
+    openarm_right_joint4:
+      lower: 0.0
+      upper: 2.4435
+    openarm_right_joint5:
+      lower: -1.5708
+      upper: 1.5708
+    openarm_right_joint6:
+      lower: -0.7854
+      upper: 0.7854
+    openarm_right_joint7:
+      lower: -0.7854
+      upper: 0.7854
+    openarm_right_finger_joint1:
+      lower: 0.0
+      upper: 0.044
+    openarm_right_finger_joint2:
+      lower: 0.0
+      upper: 0.044
+  velocity_limits:
+    openarm_left_joint1: 16.755
+    openarm_left_joint2: 16.755
+    openarm_left_joint3: 5.4454
+    openarm_left_joint4: 5.4454
+    openarm_left_joint5: 20.944
+    openarm_left_joint6: 20.944
+    openarm_left_joint7: 20.944
+    openarm_left_finger_joint1: 20.943946
+    openarm_left_finger_joint2: 20.943946
+    openarm_right_joint1: 16.755
+    openarm_right_joint2: 16.755
+    openarm_right_joint3: 5.4454
+    openarm_right_joint4: 5.4454
+    openarm_right_joint5: 20.944
+    openarm_right_joint6: 20.944
+    openarm_right_joint7: 20.944
+    openarm_right_finger_joint1: 20.943946
+    openarm_right_finger_joint2: 20.943946
+  workspace:
+    planning_frame: world
+    left_tip: openarm_left_ee_base_link
+    right_tip: openarm_right_ee_base_link
+    max_relative_translation_m: 0.02
+capabilities:
+- name: openarm.arm.move_relative
+  type: manipulation
+  skill_type: programmed
+  parameters:
+    arm:
+      type: str
+      enum:
+      - left
+      - right
+    reference_frame:
+      type: str
+      enum:
+      - world
+    translation:
+      type: vector3
+      unit: m
+  constraints:
+    max_abs_component_m: 0.02
+    max_norm_m: 0.02
+- name: openarm.gripper.move
+  type: manipulation
+  skill_type: programmed
+  parameters:
+    side:
+      type: str
+      enum:
+      - left
+      - right
+    target_m:
+      type: float
+      unit: m
+      minimum: 0.0
+      maximum: 0.044
+    duration_s:
+      type: float
+      unit: s
+      minimum: 0.25
+      maximum: 10.0
+      default: 2.0
+    hold_s:
+      type: float
+      unit: s
+      minimum: 0.0
+      maximum: 10.0
+      default: 1.0
+  constraints:
+    execution_modes:
+    - SIMULATION
+    max_target_error_m: 0.0005
+    max_mimic_error_m: 0.0005
+    max_hold_drift_m: 0.0002
+
+- name: openarm.pick_demo
+  type: manipulation
+  skill_type: programmed
+  parameters:
+    side:
+      type: str
+      enum:
+      - right
+    object_id:
+      type: str
+      enum:
+      - pick_demo_block
+    lift_m:
+      type: float
+      unit: m
+      minimum: 0.01
+      maximum: 0.02
+      default: 0.015
+  constraints:
+    execution_modes:
+    - SIMULATION
+    minimum_verified_object_rise_m: 0.008
+simulation_backends:
+  mujoco:
+    model_file: robot.mjcf.xml
+    timestep: 0.002
+  ros2:
+    model_file: robot.urdf
+    status: validated
+semantic_tags:
+- dual_arm
+- 7dof
+- mujoco
+- simulation
+metadata:
+  urdf_source: robot.urdf
+  planning_frame: world
+  body_mount_height_m: 0.42
+  movable_joint_count: 18
+  independent_dof: 16

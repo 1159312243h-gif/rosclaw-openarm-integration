@@ -1,0 +1,9068 @@
+"""
+ROSClaw CLI - Command Line Interface
+
+Entry point for the `rosclaw` command.
+
+Commands:
+    rosclaw --version          Show version
+    rosclaw init [DIR]         Initialize a ROSClaw workspace
+    rosclaw run                Start the ROSClaw runtime
+    rosclaw start              Alias for run (legacy)
+    rosclaw status             Show runtime status
+    rosclaw doctor             Run health diagnosis
+    rosclaw logs               Show runtime logs
+    rosclaw robot list         List available robots
+    rosclaw robot install ID   Install/register a robot
+    rosclaw robot inspect ID   Show complete robot profile
+    rosclaw robot validate ID  Validate e-URDF completeness
+    rosclaw practice list      List recorded episodes
+    rosclaw practice show ID   Show episode details
+    rosclaw practice replay ID Replay episode trace
+    rosclaw practice export ID --format json  Export episode metadata
+"""
+
+import argparse
+import contextlib
+import json
+import os
+import shutil
+import sys
+import time
+from datetime import UTC
+from pathlib import Path
+from typing import Any
+
+from rosclaw.agent.doctor import add_doctor_parser as _add_agent_doctor_parser
+from rosclaw.agent.init_claude_code import add_init_parser as _add_agent_init_parser
+from rosclaw.agent.install import add_install_parser as _add_agent_install_parser
+from rosclaw.agent.test_claude_code import add_test_parser as _add_agent_test_parser
+from rosclaw.app.cli import add_app_subparsers, dispatch_app_command
+from rosclaw.body.cli import add_body_subparser, dispatch_body_command
+from rosclaw.body.registry import BodyRegistryManager
+from rosclaw.body.resolver import BodyResolver
+from rosclaw.connectors.ros.cli import add_ros_subparser, cmd_doctor_ros, dispatch_ros_command
+from rosclaw.core.event_bus import Event, EventPriority
+from rosclaw.darwin.cli import cmd_darwin
+from rosclaw.eurdf.cli import add_eurdf_subparser, dispatch_eurdf_command
+from rosclaw.feedback.cli import add_feedback_subparser, dispatch_feedback_command
+from rosclaw.feedback.hooks import telemetry_command_hook
+from rosclaw.feedback.telemetry_client import TelemetryClient
+from rosclaw.firstboot.wizard import run_firstboot
+from rosclaw.firstboot.workspace import get_rosclaw_home, resolve_home
+from rosclaw.hub.cli import add_hub_subparser, dispatch_hub_command
+from rosclaw.integrations import GLOBAL_INTEGRATION_REGISTRY
+from rosclaw.integrations.lerobot.constants import DEFAULT_SMOKE_POLICY
+from rosclaw.mcp.onboarding.cli import add_mcp_subparser
+from rosclaw.mcp.server import serve as _mcp_serve
+from rosclaw.practice.config import (
+    PracticeConfig,
+    SourceConfig,
+)
+from rosclaw.practice.config import (
+    get_default_data_root as get_default_practice_data_root,
+)
+from rosclaw.practice.config import (
+    resolve_data_root as resolve_practice_data_root,
+)
+from rosclaw.practice.coordinator import PracticeCoordinator
+from rosclaw.practice.storage.catalog import PracticeCatalog
+from rosclaw.practice.storage.fallback_sync import FallbackSync
+from rosclaw.practice.storage.layout import PracticeLayout
+from rosclaw.provider.core.registry import ProviderRegistry
+from rosclaw.robot_pack.cli import add_robot_pack_subparsers, dispatch_robot_pack_command
+from rosclaw.sense.cli import (
+    cmd_sense_events,
+    cmd_sense_explain,
+    cmd_sense_now,
+    cmd_sense_readiness,
+    cmd_sense_state,
+    cmd_sense_watch,
+)
+from rosclaw.skill.cli import add_skill_hub_parsers
+from rosclaw.storage.cli import add_db_subparser, cmd_db_doctor, cmd_db_reconcile, cmd_db_status
+
+
+def _dispatch_lerobot_cli(command: str, *args: Any) -> int:
+    """Load the optional LeRobot command surface only when it is invoked."""
+    from rosclaw.integrations.lerobot import cli as lerobot_cli
+
+    handler = getattr(lerobot_cli, command)
+    return int(handler(*args))
+
+
+def _register_lerobot_cli_capabilities() -> None:
+    """Register LeRobot factories only for commands that inspect that registry."""
+    from rosclaw.integrations.lerobot.capabilities import register_lerobot_capabilities
+
+    register_lerobot_capabilities(GLOBAL_INTEGRATION_REGISTRY)
+
+
+def _cmd_mcp_serve(args: argparse.Namespace) -> int:
+    """Dispatch wrapper for `rosclaw mcp serve`."""
+    with contextlib.suppress(KeyboardInterrupt):
+        _mcp_serve(
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            robot_id=args.robot_id,
+            profile=args.profile,
+            project_root=args.project_root,
+            log_level=args.log_level,
+        )
+    return 0
+
+
+def _version() -> str:
+    from rosclaw import __version__
+
+    return __version__
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Initialize a ROSClaw workspace."""
+    target = Path(args.dir).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+
+    config_path = target / "rosclaw.yaml"
+    if config_path.exists() and not args.force:
+        print(f"[ROSClaw] Workspace already exists: {target}")
+        print("[ROSClaw] Use --force to overwrite config")
+        return 0
+
+    config_content = """# ROSClaw Workspace Configuration
+# Generated by `rosclaw init`
+
+robot_id: rosclaw_bot
+safety_level: MODERATE
+
+# Robot model (e-URDF or MuJoCo XML)
+robot_model_path: ""
+
+# Module toggles
+enable_firewall: true
+enable_memory: true
+enable_practice: true
+enable_swarm: false
+
+# LLM Provider
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  # api_key: set via ROSCLAW_API_KEY env var
+
+# Practice / Timeline
+practice:
+  output_dir: ./practice_data
+  auto_record: true
+
+# SeekDB
+memory:
+  backend: memory
+  # backend: sqlite
+  # db_path: ./rosclaw.db
+"""
+    config_path.write_text(config_content, encoding="utf-8")
+
+    # Create subdirectories
+    (target / "practice_data").mkdir(exist_ok=True)
+    (target / "skills").mkdir(exist_ok=True)
+    (target / "models").mkdir(exist_ok=True)
+
+    print(f"[ROSClaw] Initialized workspace: {target}")
+    print(f"[ROSClaw] Config: {config_path}")
+    print("[ROSClaw] Next: edit rosclaw.yaml, then run `rosclaw run`")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Start the ROSClaw runtime."""
+    from rosclaw.core import Runtime, RuntimeConfig
+
+    config = RuntimeConfig(
+        robot_id=args.robot_id,
+        robot_model_path=args.model_path,
+        enable_firewall=args.firewall,
+        enable_memory=args.memory,
+        enable_practice=args.practice,
+        enable_swarm=args.swarm,
+    )
+
+    runtime = Runtime(config)
+
+    # PID file for daemon management
+    pid_file = get_rosclaw_home() / "runtime.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        runtime.initialize()
+        runtime.start()
+
+        # Write PID file so `rosclaw stop` can find us
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+        print(f"\n[ROSClaw] Runtime started for robot: {args.robot_id}")
+        print(f"[ROSClaw] PID {os.getpid()} written to {pid_file}")
+        print("[ROSClaw] Press Ctrl+C to stop\n")
+
+        import time
+
+        while runtime.is_running:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n[ROSClaw] Shutdown requested...")
+    finally:
+        runtime.stop()
+        if pid_file.exists():
+            pid_file.unlink()
+
+    return 0
+
+
+def _cmd_doctor_ros2() -> int:
+    """Run L1-L5 ROS2 environment profile check."""
+    import shutil
+    import subprocess
+
+    checks = []
+
+    # L1: ros2 CLI
+    ros2_path = shutil.which("ros2")
+    l1_ok = ros2_path is not None
+    checks.append(("L1: ros2 CLI", ros2_path or "not found", l1_ok))
+
+    # L2: ROS_DISTRO / AMENT_PREFIX_PATH
+    distro = os.environ.get("ROS_DISTRO", "")
+    ament = os.environ.get("AMENT_PREFIX_PATH", "")
+    l2_ok = bool(distro and ament)
+    if l2_ok:
+        checks.append(("L2: ROS_DISTRO", f"{distro} @ {ament.split(':')[0]}", True))
+    else:
+        # Fallback: check /opt/ros
+        opt_ros = "/opt/ros"
+        if os.path.isdir(opt_ros):
+            distros = [d for d in os.listdir(opt_ros) if os.path.isdir(os.path.join(opt_ros, d))]
+            if distros:
+                checks.append(
+                    (
+                        "L2: ROS_DISTRO",
+                        f"unset (found /opt/ros/{distros[0]} — source setup.bash?)",
+                        False,
+                    )
+                )
+            else:
+                checks.append(("L2: ROS_DISTRO", "not set, no /opt/ros/* found", False))
+        else:
+            checks.append(("L2: ROS_DISTRO", "not set, /opt/ros missing", False))
+
+    # L3: rclpy import
+    try:
+        import rclpy  # noqa: F401
+
+        l3_ok = True
+        checks.append(("L3: Python rclpy", "OK", True))
+    except ImportError as exc:
+        l3_ok = False
+        checks.append(("L3: Python rclpy", f"FAIL: {exc}", False))
+
+    # L4: ros2 graph commands
+    l4_ok = True
+    l4_failures = []
+    for cmd, label in [
+        ("ros2 topic list", "topic"),
+        ("ros2 service list", "service"),
+        ("ros2 node list", "node"),
+    ]:
+        try:
+            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                l4_ok = False
+                l4_failures.append(f"{label}: {result.stderr.strip()[:60]}")
+        except Exception as exc:
+            l4_ok = False
+            l4_failures.append(f"{label}: {exc}")
+    if l4_ok:
+        checks.append(("L4: Graph commands", "OK", True))
+    else:
+        checks.append(("L4: Graph commands", "; ".join(l4_failures), False))
+
+    # L5: active pub/sub (optional — no running nodes is OK for a fresh env)
+    try:
+        result = subprocess.run(
+            ["ros2", "topic", "list"], capture_output=True, text=True, timeout=10
+        )
+        topics = result.stdout.strip().splitlines() if result.returncode == 0 else []
+        if topics and topics != ["/rosout"]:
+            checks.append(("L5: Active pub/sub", f"{len(topics)} topic(s)", True))
+            l5_ok = True
+        else:
+            checks.append(
+                (
+                    "L5: Active pub/sub",
+                    "no active topics (no running nodes — OK for fresh env)",
+                    True,
+                )
+            )
+            l5_ok = True
+    except Exception as exc:
+        checks.append(("L5: Active pub/sub", f"FAIL: {exc}", False))
+        l5_ok = False
+
+    # Print report
+    print("=" * 60)
+    print("ROSClaw Doctor — ROS2 Environment Profile")
+    print("=" * 60)
+    for name, value, ok in checks:
+        icon = "✅" if ok else "❌"
+        print(f"  {icon} {name:<28} {value}")
+    print("=" * 60)
+
+    # Determine level
+    level = 0
+    for i, ok in enumerate([l1_ok, l2_ok, l3_ok, l4_ok, l5_ok], 1):
+        if ok:
+            level = i
+        else:
+            break
+
+    print(f"  Level achieved: L{level}")
+
+    if level >= 4:
+        print("  ROS2 profile: READY — ROSClaw ROS2 wrapper can run")
+        return 0
+    elif level >= 3:
+        print("  ROS2 profile: PARTIAL — Python API OK but graph commands failed")
+        print("  ROS2 wrapper importable but may fail at runtime if daemon is down")
+        return 0
+    elif level >= 1:
+        print("  ROS2 profile: NOT READY — CLI found but Python API missing")
+        print("  Tip: source /opt/ros/<distro>/setup.bash in your shell")
+        return 1
+    else:
+        print("  ROS2 profile: NOT AVAILABLE — ROS2 not installed")
+        print("  ROSClaw will run in sim-only / mock-only mode")
+        return 0  # Not an error — sim-only is valid
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Deep health diagnosis for ROSClaw runtime and dependencies."""
+    home = resolve_home()
+    client = TelemetryClient(home)
+    _record_doctor_event(client, "doctor_started")
+
+    exit_code = 0
+    try:
+        exit_code = _run_doctor(args)
+    finally:
+        status = "success" if exit_code == 0 else "failure"
+        _record_doctor_event(client, "doctor_completed", status)
+    return exit_code
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    """Internal doctor implementation."""
+    if getattr(args, "level", None):
+        from rosclaw.runtime.doctor_levels import LevelDoctor
+
+        level_result = LevelDoctor(resolve_home()).run(args.level)
+        if getattr(args, "json", False):
+            print(json.dumps(level_result.to_dict(), indent=2, default=str))
+        else:
+            fields = [
+                ("Package healthy", level_result.package_healthy),
+                ("Configured", level_result.configured),
+                ("Runtime initialized", level_result.runtime_initialized),
+                ("Southbound connected", level_result.southbound_connected),
+                ("Action dry run", level_result.action_dry_run),
+                ("Verified action path", level_result.verified_action_path),
+                ("Robot connected", level_result.robot_connected),
+                ("Real execution ready", level_result.real_execution_ready),
+            ]
+            print("=" * 60)
+            print(f"ROSClaw Doctor - {level_result.requested_level.value.upper()}")
+            print("=" * 60)
+            for name, ready in fields:
+                print(f"{name:<25} {'YES' if ready else 'NO'}")
+            print(f"Verified execution mode  {level_result.verified_execution_mode or 'NONE'}")
+            print("=" * 60)
+            for check in level_result.checks:
+                scope = "required" if check.required else "informational"
+                print(
+                    f"[{'PASS' if check.passed else 'FAIL'}] {check.id} ({scope}): {check.detail}"
+                )
+            print("=" * 60)
+        return level_result.exit_code
+
+    # --ros2 profile check: L1-L5 layered ROS2 environment validation
+    if getattr(args, "ros2", False):
+        return _cmd_doctor_ros2()
+
+    # RealSense D405 stack check
+    if getattr(args, "realsense", False):
+        return _run_doctor_realsense(args)
+
+    # New structured firstboot doctor modes
+    if any(
+        getattr(args, flag, False)
+        for flag in ("bootstrap", "full", "fix", "json", "gpu", "network")
+    ):
+        from rosclaw.firstboot.doctor import FirstbootDoctor
+
+        doctor = FirstbootDoctor(resolve_home())
+        if getattr(args, "bootstrap", False):
+            doctor_result = doctor.run_bootstrap(
+                fix=getattr(args, "fix", False),
+                json_output=getattr(args, "json", False),
+            )
+        else:
+            doctor_result = doctor.run_full(
+                fix=getattr(args, "fix", False),
+                json_output=getattr(args, "json", False),
+                check_gpu=getattr(args, "gpu", False),
+                check_network=getattr(args, "network", False),
+            )
+        return doctor_result.exit_code
+
+    import importlib
+    import platform
+
+    issues = []
+    checks = []
+
+    # 1. Python version
+    py_version = platform.python_version()
+    py_ok = py_version >= "3.11"
+    checks.append(("Python version", py_version, py_ok))
+    if not py_ok:
+        issues.append(f"Python {py_version} < 3.11 (recommended)")
+
+    # 2. Core modules import
+    core_modules = [
+        ("rosclaw.core.runtime", "Runtime"),
+        ("rosclaw.core.event_bus", "EventBus"),
+        ("rosclaw.provider.core.registry", "ProviderRegistry"),
+        ("rosclaw.sandbox.runtime_adapter", "SandboxRuntimeAdapter"),
+        ("rosclaw.memory.interface", "MemoryInterface"),
+        ("rosclaw.practice.episode_recorder", "EpisodeRecorder"),
+        ("rosclaw.how.engine", "HeuristicEngine"),
+        ("rosclaw.runtime.eurdf_loader", "EURDFLoader"),
+    ]
+    for mod_name, cls_name in core_modules:
+        try:
+            mod = importlib.import_module(mod_name)
+            getattr(mod, cls_name)
+            checks.append((f"Module {mod_name}", "OK", True))
+        except Exception as exc:
+            checks.append((f"Module {mod_name}", f"FAIL: {exc}", False))
+            issues.append(f"Cannot import {mod_name}: {exc}")
+
+    # 3. e-URDF-Zoo accessibility
+    from rosclaw.runtime.eurdf_loader import _default_zoo_path
+
+    zoo_path = _default_zoo_path()
+    zoo_ok = zoo_path.exists() and any(zoo_path.iterdir())
+    checks.append(("e-URDF-Zoo", str(zoo_path), zoo_ok))
+    if not zoo_ok:
+        issues.append(f"e-URDF-Zoo not found at {zoo_path}")
+
+    # 4. Config file
+    config_path = Path("rosclaw.yaml")
+    config_ok = config_path.exists()
+    checks.append(("Workspace config", str(config_path), config_ok))
+    if not config_ok:
+        issues.append("No rosclaw.yaml in current directory. Run `rosclaw init`.")
+
+    # 5. Key dependencies
+    deps = ["yaml", "numpy", "pytest", "asyncio"]
+    for dep in deps:
+        try:
+            mod = importlib.import_module(dep)
+            ver = getattr(mod, "__version__", "unknown")
+            checks.append((f"Dependency {dep}", ver, True))
+        except ImportError:
+            checks.append((f"Dependency {dep}", "MISSING", False))
+            issues.append(f"Python package '{dep}' not installed")
+
+    # 6. GPU / CUDA (optional)
+    try:
+        import torch
+
+        cuda_ok = torch.cuda.is_available()
+        device_count = torch.cuda.device_count() if cuda_ok else 0
+        checks.append(
+            ("PyTorch CUDA", f"{device_count} device(s)" if cuda_ok else "Not available", cuda_ok)
+        )
+    except ImportError:
+        checks.append(("PyTorch", "Not installed", True))  # optional
+
+    # 7. MuJoCo (required for the supported simulation golden path)
+    try:
+        import mujoco
+
+        checks.append(("MuJoCo", mujoco.__version__, True))
+    except ImportError:
+        checks.append(("MuJoCo", "Not installed", False))
+        issues.append("MuJoCo is not installed")
+
+    # 8. RealSense D405 stack (always reported; default doctor stays passable)
+    rs_checks, rs_warnings, rs_issues = _collect_realsense_checks(args)
+    checks.extend(rs_checks)
+    recommendations = rs_warnings + rs_issues
+
+    # Output
+    print("=" * 60)
+    print("ROSClaw v1.0 — Doctor")
+    print("=" * 60)
+    for name, value, ok in checks:
+        icon = "✅" if ok else "❌"
+        print(f"  {icon} {name:<30} {value}")
+    print("=" * 60)
+
+    # Auto-register builtin providers and skills if missing
+    _providers, _skills = _auto_register_builtins()
+
+    if recommendations:
+        print(f"\n💡 RealSense recommendations ({len(recommendations)}):")
+        for r in recommendations:
+            print(f"  • {r}")
+
+    if issues:
+        print(f"\n⚠️  Issues found ({len(issues)}):")
+        for i, issue in enumerate(issues, 1):
+            print(f"  {i}. {issue}")
+        print("\nRecommendations:")
+        if any("e-URDF-Zoo" in i for i in issues):
+            print("  • Ensure e-urdf-zoo/ directory exists alongside src/")
+        if any("rosclaw.yaml" in i for i in issues):
+            print("  • Run: rosclaw init")
+        if any("Not installed" in i for i in issues):
+            print("  • Install deps: pip install -e .")
+        return 1
+
+    print("\nPackage and configuration checks passed.")
+    print("Robot connected: NO (not checked)")
+    print("Real execution ready: NO (run `rosclaw doctor --level verified` for simulation)")
+    return 0
+
+
+def _record_doctor_event(
+    client: "TelemetryClient", event_type: str, status: str | None = None
+) -> None:
+    """Record a doctor_started / doctor_completed telemetry event."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        client.record_event(
+            event_type=event_type,
+            command_name="doctor",
+            command_status=status,
+        )
+
+
+def cmd_firstboot(args: argparse.Namespace) -> int:
+    """Run ROSClaw first boot wizard."""
+    return run_firstboot(args)
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Configuration commands."""
+    from rosclaw.firstboot.config import validate_config
+
+    home = resolve_home()
+    config_path = home / "config" / "rosclaw.yaml"
+
+    if args.config_command == "show":
+        if not config_path.exists():
+            print("[ROSClaw] No config found. Run `rosclaw firstboot`.")
+            return 1
+        print(config_path.read_text(encoding="utf-8"))
+        return 0
+
+    if args.config_command == "path":
+        print(config_path)
+        return 0
+
+    if args.config_command == "validate":
+        valid, errors = validate_config(home)
+        if valid:
+            print("[ROSClaw] Config is valid.")
+            return 0
+        print("[ROSClaw] Config validation failed:")
+        for err in errors:
+            print(f"  • {err}")
+        return 1
+
+    if args.config_command == "edit":
+        editor = args.editor or os.environ.get("EDITOR", "nano")
+        if not config_path.exists():
+            print("[ROSClaw] No config found. Run `rosclaw firstboot`.")
+            return 1
+        os.system(f'{editor} "{config_path}"')
+        return 0
+
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    """Profile management commands."""
+    import yaml
+
+    home = resolve_home()
+    profiles_dir = home / "config" / "profiles"
+
+    if args.profile_command == "list":
+        if not profiles_dir.exists():
+            print("No profiles found.")
+            return 0
+        profiles = sorted(p.stem for p in profiles_dir.glob("*.yaml"))
+        print("Available profiles:")
+        for name in profiles:
+            print(f"  • {name}")
+        return 0
+
+    if args.profile_command == "current":
+        config_path = home / "config" / "rosclaw.yaml"
+        if config_path.exists():
+            try:
+                cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                print(cfg.get("workspace", {}).get("profile", "offline"))
+                return 0
+            except yaml.YAMLError as exc:
+                print(f"[ROSClaw] Error reading config: {exc}")
+                return 1
+        print("offline")
+        return 0
+
+    if args.profile_command == "use":
+        config_path = home / "config" / "rosclaw.yaml"
+        if not config_path.exists():
+            print("[ROSClaw] No config found. Run `rosclaw firstboot`.")
+            return 1
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            print(f"[ROSClaw] Error reading config: {exc}")
+            return 1
+
+        cfg.setdefault("workspace", {})["profile"] = args.profile_name
+        config_path.write_text(
+            yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        print(f"Profile set to: {args.profile_name}")
+        return 0
+
+    return 0
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Uninstall ROSClaw CLI and optionally remove workspace data."""
+    import shutil
+
+    home = resolve_home()
+
+    if args.purge:
+        if home.exists():
+            shutil.rmtree(home)
+            print(f"[ROSClaw] Removed workspace: {home}")
+        print("[ROSClaw] To remove the CLI, run one of:")
+        print("  uv tool uninstall rosclaw")
+        print("  pipx uninstall rosclaw")
+        print(f"  rm -rf {home}/venv  # if venv backend was used")
+        return 0
+
+    if args.keep_data:
+        print("[ROSClaw] Workspace kept at:", home)
+        print("[ROSClaw] To remove the CLI, run one of:")
+        print("  uv tool uninstall rosclaw")
+        print("  pipx uninstall rosclaw")
+        print(f"  rm -rf {home}/venv  # if venv backend was used")
+        return 0
+
+    print("[ROSClaw] Use --keep-data to keep workspace, or --purge to remove everything.")
+    return 1
+
+
+class _MockSeekDB:
+    """Mock seekdb client for CLI HOW commands."""
+
+    def query(self, table, filters=None, order_by=None, limit=None):
+        cond = filters.get("condition") if filters else ""
+        return [
+            {
+                "rule_id": "cli-rule-001",
+                "condition": cond,
+                "action": "Review episode logs and retry with adjusted parameters",
+                "priority": 1,
+            }
+        ]
+
+
+def _builtin_provider_catalog() -> list[dict[str, Any]]:
+    """Return the safe built-in provider catalog used by provider smoke commands."""
+    return [
+        {
+            "name": "llm",
+            "type": "llm",
+            "status": "registered",
+            "description": "LLM provider for text generation and task planning",
+            "capabilities": ["llm.chat", "llm.plan", "text.generate", "reasoning.task"],
+            "modalities": {"input": ["text"], "output": ["text", "plan"]},
+        },
+        {
+            "name": "vlm",
+            "type": "vlm",
+            "status": "registered",
+            "description": "Vision-Language Model for object grounding and perception",
+            "capabilities": [
+                "vlm.vqa",
+                "vlm.scene_graph",
+                "vlm.object_grounding",
+                "vlm.risk_assessment",
+            ],
+            "modalities": {"input": ["image", "text"], "output": ["text", "scene_graph"]},
+        },
+        {
+            "name": "vla",
+            "type": "vla",
+            "status": "registered",
+            "description": "Vision-Language-Action model for guarded action proposals",
+            "capabilities": ["vla.plan", "vla.action_proposal", "control.proposal"],
+            "modalities": {"input": ["image", "text", "state"], "output": ["action_plan"]},
+        },
+        {
+            "name": "vln",
+            "type": "vln",
+            "status": "registered",
+            "description": "Vision-Language-Navigation for mobile robot path planning",
+            "capabilities": ["vln.navigate", "navigation.plan", "navigation.waypoint"],
+            "modalities": {"input": ["image", "text", "map"], "output": ["path"]},
+        },
+        {
+            "name": "world",
+            "type": "world",
+            "status": "registered",
+            "description": "World state provider for scene understanding",
+            "capabilities": ["world.state", "world.scene_graph", "vlm.scene_graph"],
+            "modalities": {"input": ["state", "image", "text"], "output": ["scene_graph"]},
+        },
+        {
+            "name": "skill",
+            "type": "skill",
+            "status": "registered",
+            "description": "Skill execution provider for robot actions",
+            "capabilities": ["skill.invoke", "skill.plan", "skill.validate"],
+            "modalities": {"input": ["task", "state"], "output": ["skill_result"]},
+        },
+        {
+            "name": "critic",
+            "type": "critic",
+            "status": "registered",
+            "description": "Critic provider for success/failure judgment",
+            "capabilities": ["critic.risk", "critic.success", "critic.regression"],
+            "modalities": {"input": ["trace", "state", "text"], "output": ["judgement"]},
+        },
+        {
+            "name": "embedding",
+            "type": "embedding",
+            "status": "registered",
+            "description": "Embedding provider for semantic search",
+            "capabilities": ["embedding.encode", "embedding.search", "memory.retrieve"],
+            "modalities": {"input": ["text"], "output": ["embedding", "matches"]},
+        },
+    ]
+
+
+def _provider_contract(record: dict[str, Any]) -> dict[str, Any]:
+    """Add runtime and safety fields shared by provider contract commands."""
+    payload = dict(record)
+    payload["status"] = "registered_not_verified"
+    payload.setdefault(
+        "runtime",
+        {
+            "backend": "builtin",
+            "protocol": "in_process",
+            "endpoint": None,
+            "dry_run_safe": True,
+        },
+    )
+    payload.setdefault(
+        "safety",
+        {
+            "executable": False,
+            "requires_guard": True,
+            "requires_human_gate": record.get("type") in {"vla", "skill"},
+        },
+    )
+    payload.setdefault(
+        "readiness",
+        {
+            "implementation_kind": "builtin_contract",
+            "execution_mode": "DRY_RUN",
+            "registered": True,
+            "loaded": False,
+            "healthy": False,
+            "executable": False,
+            "authorized": False,
+            "verified": False,
+            "verified_environment": False,
+        },
+    )
+    return payload
+
+
+def _builtin_provider_contracts() -> list[dict[str, Any]]:
+    """Return built-in provider records with explicit runtime/safety contracts."""
+    return [_provider_contract(record) for record in _builtin_provider_catalog()]
+
+
+def _auto_register_builtins() -> tuple[list, list]:
+    """Auto-register builtin providers and skills if registry is empty.
+
+    Returns:
+        (providers, skills) tuples of registered items.
+    """
+    registered_providers: list = []
+    registered_skills: list = []
+
+    # Register builtin providers
+    try:
+        from rosclaw.provider.adapters.generic import GenericProvider
+        from rosclaw.provider.core.manifest import ProviderManifest
+        from rosclaw.provider.core.registry import ProviderRegistry
+
+        reg = ProviderRegistry()
+        providers = list(reg.list_providers()) if hasattr(reg, "list_providers") else []
+        if not providers:
+            for record in _builtin_provider_contracts():
+                try:
+                    manifest = ProviderManifest.from_dict(
+                        {
+                            "name": record["name"],
+                            "version": "1.0.0",
+                            "type": record["type"],
+                            "description": record["description"],
+                            "capabilities": record["capabilities"],
+                            "modalities": record["modalities"],
+                            "runtime": record["runtime"],
+                            "safety": record["safety"],
+                        }
+                    )
+                    reg.register(manifest, GenericProvider, auto_load=False)
+                    registered_providers.append(record)
+                except Exception:
+                    pass
+            if registered_providers:
+                print(f"[ROSClaw] Auto-registered {len(registered_providers)} builtin providers")
+        else:
+            registered_providers = providers
+    except Exception:
+        pass
+
+    # Register builtin skills
+    try:
+        from rosclaw.skill.builtins import load_builtins
+        from rosclaw.skill_manager.registry import SkillEntry, SkillRegistry
+
+        reg = SkillRegistry()
+        skills = list(reg.list_skills()) if hasattr(reg, "list_skills") else []
+        if not skills:
+            # Legacy generic builtins expected by existing tests and scripts.
+            generic_skills = [
+                (
+                    "pid_move",
+                    "Move robot using PID control",
+                    "motion",
+                    {"target": "float", "duration": "float"},
+                ),
+                (
+                    "reach",
+                    "Reach to a target pose",
+                    "manipulation",
+                    {"target_pose": "list[float]", "approach": "str"},
+                ),
+                (
+                    "grasp",
+                    "Grasp an object",
+                    "manipulation",
+                    {"object_id": "str", "force": "float"},
+                ),
+                (
+                    "navigate",
+                    "Navigate to a waypoint",
+                    "navigation",
+                    {"waypoint": "list[float]", "speed": "float"},
+                ),
+                (
+                    "inspect",
+                    "Inspect a target with sensors",
+                    "perception",
+                    {"target_id": "str", "sensor": "str"},
+                ),
+            ]
+            for name, description, skill_type, params in generic_skills:
+                try:
+                    entry = SkillEntry(
+                        name=name,
+                        description=description,
+                        skill_type=skill_type,
+                        parameters=params,
+                    )
+                    reg.register(entry)
+                    registered_skills.append(entry)
+                except Exception:
+                    pass
+            # RealSense-specific builtins added by PR #48.
+            _, loaded = load_builtins(reg)
+            registered_skills.extend(loaded)
+            if registered_skills:
+                print(f"[ROSClaw] Auto-registered {len(registered_skills)} builtin skills")
+        else:
+            registered_skills = [reg.get(name) for name in skills]
+    except Exception:
+        pass
+
+    return registered_providers, registered_skills
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Display ROSClaw runtime logs."""
+    import glob
+    import os
+    from datetime import datetime
+
+    log_dir = get_rosclaw_home() / "logs"
+    if not log_dir.exists():
+        print(f"[ROSClaw] Log directory not found: {log_dir}")
+        print("[ROSClaw] No logs available yet. Start runtime with `rosclaw run`.")
+        return 0
+
+    # Collect log files
+    pattern = str(log_dir / "*.log")
+    log_files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+
+    if not log_files:
+        print(f"[ROSClaw] No log files in {log_dir}")
+        return 0
+
+    # Filter by module if specified
+    module_filter = args.module
+    if module_filter:
+        log_files = [f for f in log_files if module_filter in os.path.basename(f)]
+
+    # Show recent N lines
+    tail_lines = args.tail
+    level_filter = args.level.upper() if args.level else None
+
+    print("=" * 70)
+    print(f"ROSClaw Logs — {log_dir}")
+    if module_filter:
+        print(f"Module filter: {module_filter}")
+    if level_filter:
+        print(f"Level filter:  {level_filter}")
+    print("=" * 70)
+
+    for log_file in log_files[: args.files]:
+        fname = os.path.basename(log_file)
+        mtime = datetime.fromtimestamp(os.path.getmtime(log_file)).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n📄 {fname} (modified {mtime})")
+        print("-" * 70)
+
+        try:
+            with open(log_file, encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as exc:
+            print(f"  [Error reading file: {exc}]")
+            continue
+
+        # Filter by level
+        if level_filter:
+            lines = [ln for ln in lines if level_filter in ln.upper()]
+
+        # Tail
+        if tail_lines and len(lines) > tail_lines:
+            lines = lines[-tail_lines:]
+            print(f"  ... (showing last {tail_lines} lines)")
+
+        for line in lines:
+            print(f"  {line.rstrip()}")
+
+    print("\n" + "=" * 70)
+    print(f"Total log files: {len(log_files)}")
+    print("Commands:")
+    print("  rosclaw logs --tail 50          Show last 50 lines")
+    print("  rosclaw logs --level ERROR      Filter ERROR lines")
+    print("  rosclaw logs --module runtime   Filter by module")
+    print("  rosclaw logs --follow           Watch live (not implemented)")
+    return 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Show ROSClaw dashboard status or start the web server."""
+    if getattr(args, "status", False):
+        return _print_dashboard_status()
+
+    try:
+        from rosclaw.dashboard.launcher import serve_dashboard
+
+        host = getattr(args, "host", "0.0.0.0")
+        port = getattr(args, "port", 8765)
+        trace_id = getattr(args, "trace", None)
+        print("ROSClaw v1.0 Dashboard")
+        print("[ROSClaw] Starting Dashboard Web Server...")
+        dashboard_path = f"/traces?trace_id={trace_id}" if trace_id else "/traces"
+        print(f"[ROSClaw] Trace Dashboard URL: http://localhost:{port}{dashboard_path}")
+        print("[ROSClaw] Press Ctrl+C to stop")
+        serve_dashboard(host=host, port=port)
+    except ImportError as exc:
+        print(f"[ROSClaw] ❌ Dashboard dependencies missing: {exc}")
+        print("[ROSClaw] Run: pip install 'rosclaw[dashboard]'")
+        return 1
+    except SystemExit as exc:
+        # uvicorn calls sys.exit on error (e.g., port in use)
+        if exc.code != 0:
+            print(f"[ROSClaw] Server exited (code={exc.code}). Port may be in use.")
+        return 0
+    return 0
+
+
+def _trace_store_from_args(args: argparse.Namespace) -> Any:
+    from rosclaw.observability.store import TraceStore
+
+    return TraceStore(
+        home=getattr(args, "home", None),
+        path=getattr(args, "path", None),
+    )
+
+
+def _trace_filters(args: argparse.Namespace) -> tuple[set[str] | None, set[str] | None]:
+    kind = getattr(args, "kind", None)
+    status = getattr(args, "status", None)
+    kinds = {part.strip().upper() for part in kind.split(",") if part.strip()} if kind else None
+    statuses = (
+        {part.strip().upper() for part in status.split(",") if part.strip()} if status else None
+    )
+    return kinds, statuses
+
+
+def _print_trace_span(span: dict[str, Any], *, indent: int = 0) -> None:
+    started = time.strftime("%H:%M:%S", time.localtime(span.get("started_at") or 0))
+    duration = float(span.get("duration_ms") or 0)
+    prefix = "  " * indent
+    print(
+        f"{started}  {prefix}{str(span.get('span_kind', '?')):<12} "
+        f"{str(span.get('status', '?')):<8} {duration:9.2f} ms  {span.get('name', '?')}"
+    )
+
+
+def _print_trace_tree(nodes: list[dict[str, Any]], depth: int = 0) -> None:
+    for node in nodes:
+        _print_trace_span(node, indent=depth)
+        _print_trace_tree(node.get("children", []), depth + 1)
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    """Inspect, tail, explain, replay, or export structured ROSClaw traces."""
+
+    store = _trace_store_from_args(args)
+    command = getattr(args, "trace_command", None)
+
+    if command == "list":
+        traces = store.list_traces(limit=args.limit)
+        if args.json:
+            print(json.dumps({"count": len(traces), "traces": traces}, indent=2))
+            return 0
+        if not traces:
+            print(f"No traces found in {store.path}")
+            return 0
+        print("TRACE ID                         STATUS    SPANS   DURATION   KINDS")
+        for item in traces:
+            kind_text = ",".join(item["kinds"])
+            print(
+                f"{item['trace_id']:<32} {item['status']:<9} {item['span_count']:>5}   "
+                f"{item['duration_ms']:>8.2f}ms   {kind_text}"
+            )
+        return 0
+
+    if command in {"show", "replay"}:
+        trace = store.get_trace(args.trace_id)
+        if not trace["spans"]:
+            print(f"Trace not found: {args.trace_id}", file=sys.stderr)
+            return 1
+        if getattr(args, "provider", False):
+            trace["spans"] = [
+                span for span in trace["spans"] if span.get("span_kind") in {"LLM", "VLM"}
+            ]
+            trace["span_count"] = len(trace["spans"])
+        if getattr(args, "json", False):
+            print(json.dumps(trace, indent=2, ensure_ascii=False, default=str))
+            return 0
+        print(f"Trace {trace['trace_id']} ({trace['span_count']} spans)")
+        if command == "replay" or getattr(args, "provider", False):
+            for span in trace["spans"]:
+                _print_trace_span(span)
+        else:
+            _print_trace_tree(trace["tree"])
+        return 0
+
+    if command == "tail":
+        kinds, statuses = _trace_filters(args)
+        seen: set[str] = set()
+        try:
+            while True:
+                spans = store.read(
+                    trace_id=args.trace_id,
+                    kinds=kinds,
+                    statuses=statuses,
+                    limit=args.limit,
+                )
+                for span in spans:
+                    event_id = str(span.get("event_id"))
+                    if event_id in seen:
+                        continue
+                    seen.add(event_id)
+                    if args.json:
+                        print(json.dumps(span, ensure_ascii=False, default=str), flush=True)
+                    else:
+                        _print_trace_span(span)
+                if not args.follow:
+                    break
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    if command == "explain":
+        event = store.find_event(args.event_id)
+        if event is None:
+            print(f"Trace event not found: {args.event_id}", file=sys.stderr)
+            return 1
+        print(json.dumps(event, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    if command == "export":
+        trace = store.get_trace(args.trace_id)
+        if not trace["spans"]:
+            print(f"Trace not found: {args.trace_id}", file=sys.stderr)
+            return 1
+        if args.format == "jsonl":
+            rendered = (
+                "\n".join(
+                    json.dumps(span, ensure_ascii=False, default=str) for span in trace["spans"]
+                )
+                + "\n"
+            )
+        else:
+            rendered = json.dumps(trace, indent=2, ensure_ascii=False, default=str) + "\n"
+        if args.output:
+            output = Path(args.output).expanduser()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+            print(str(output))
+        else:
+            print(rendered, end="")
+        return 0
+
+    return 1
+
+
+def _print_dashboard_status() -> int:
+    """Print the text-only dashboard status summary."""
+    import importlib
+
+    config_path = Path("rosclaw.yaml")
+    has_config = config_path.exists()
+
+    # Auto-register builtins so provider/skill counts are accurate
+    _auto_register_builtins()
+
+    # Module health
+    modules = {
+        "core.runtime": "Runtime",
+        "core.event_bus": "EventBus",
+        "firewall.validator": "FirewallValidator",
+        "memory.interface": "MemoryInterface",
+        "practice.recorder": "PracticeRecorder",
+        "sandbox.runtime_adapter": "SandboxRuntimeAdapter",
+        "how.engine": "HeuristicEngine",
+    }
+
+    health = []
+    for mod_name, cls_name in modules.items():
+        try:
+            mod = importlib.import_module(f"rosclaw.{mod_name}")
+            getattr(mod, cls_name)
+            health.append((mod_name, "HEALTHY"))
+        except (ImportError, AttributeError):
+            health.append((mod_name, "DEGRADED"))
+
+    # Provider/Skill registration status
+    registered_providers, registered_skills = _auto_register_builtins()
+    provider_count = len(registered_providers)
+    skill_count = len(registered_skills)
+
+    # Episode count
+    episode_count = 0
+    try:
+        from rosclaw.practice.episode_recorder import EpisodeRecorder
+
+        recorder = EpisodeRecorder(
+            "cli", event_bus=None, artifact_base_dir=str(get_rosclaw_home() / "artifacts")
+        )
+        episodes = recorder.list_episodes()
+        episode_count = len(episodes)
+    except Exception:
+        pass
+
+    # Output
+    print("=" * 60)
+    print("ROSClaw v1.0 Dashboard")
+    print("=" * 60)
+    print(f"Config:       {'found' if has_config else 'missing'}")
+    print(f"Providers:    {provider_count} registered")
+    print(f"Skills:       {skill_count} registered")
+    print(f"Episodes:     {episode_count} recorded")
+    print("-" * 60)
+    print("Modules:")
+    for mod_name, status in health:
+        icon = "✅" if status == "HEALTHY" else "❌"
+        print(f"  {icon} {mod_name:<30} {status}")
+    print("=" * 60)
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show ROSClaw runtime status."""
+    if getattr(args, "status_command", None) == "capabilities":
+        return cmd_status_capabilities(args)
+
+    import importlib
+
+    config_path = Path("rosclaw.yaml")
+    has_config = config_path.exists()
+
+    # Module health checks
+    modules = {
+        "core.runtime": "Runtime",
+        "core.event_bus": "EventBus",
+        "firewall.validator": "FirewallValidator",
+        "memory.interface": "MemoryInterface",
+        "practice.recorder": "PracticeRecorder",
+        "sandbox.runtime_adapter": "SandboxRuntimeAdapter",
+        "how.engine": "HeuristicEngine",
+    }
+
+    health = []
+    for mod_name, cls_name in modules.items():
+        try:
+            mod = importlib.import_module(f"rosclaw.{mod_name}")
+            getattr(mod, cls_name)
+            health.append((mod_name, "HEALTHY"))
+        except (ImportError, AttributeError):
+            health.append((mod_name, "DEGRADED"))
+
+    # Overall status
+    degraded = [m for m, s in health if s == "DEGRADED"]
+    overall = "HEALTHY" if not degraded else "DEGRADED"
+
+    if getattr(args, "json", False):
+        # JSON output mode
+        result = {
+            "version": _version(),
+            "config_file": str(config_path),
+            "config_found": has_config,
+            "overall": overall,
+            "modules": dict(health),
+            "degraded_count": len(degraded),
+        }
+        print(json.dumps(result, indent=2))
+        return 1 if degraded else 0
+
+    # Human-readable output
+    print("=" * 50)
+    print("ROSClaw v1.0 Status")
+    print("=" * 50)
+    print(f"Config file:  {'found' if has_config else 'missing'} ({config_path})")
+    print(f"Overall:      {overall}")
+    print("-" * 50)
+    print("Modules:")
+    for mod_name, status in health:
+        icon = "OK" if status == "HEALTHY" else "DEGRADED"
+        print(f"  [{icon}] {mod_name:<30} {status}")
+    print("=" * 50)
+
+    if degraded:
+        print(f"\nDegraded modules ({len(degraded)}): {', '.join(degraded)}")
+        return 1
+    return 0
+
+
+def cmd_status_capabilities(args: argparse.Namespace) -> int:
+    """Show the canonical product capability boundary."""
+    from rosclaw.product.cli import cmd_status_capabilities as product_handler
+
+    return product_handler(args)
+
+
+def cmd_robot_list(_args: argparse.Namespace) -> int:
+    """List all available robots in the e-URDF-Zoo."""
+    from rosclaw.runtime import RobotRegistry
+
+    registry = RobotRegistry()
+    available = registry.list_available()
+    registered = registry.list_installed()
+
+    print("=" * 50)
+    print("ROSClaw e-URDF-Zoo — Robot Registry")
+    print("=" * 50)
+
+    if available:
+        print(f"\nAvailable robots ({len(available)}):")
+        for rid in available:
+            status = "[installed]" if rid in registered else "[available]"
+            print(f"  {status:<12} {rid}")
+    else:
+        print("\nNo robots found in e-URDF-Zoo.")
+        print("Expected path: e-urdf-zoo/<robot_id>/robot.eurdf.yaml")
+
+    if registered:
+        print(f"\nInstalled robots ({len(registered)}):")
+        for rid in registered:
+            print(f"  [installed]  {rid}")
+
+    print("=" * 50)
+    print("\nCommands:")
+    print("  rosclaw robot install <robot_id>")
+    print("  rosclaw robot inspect <robot_id>")
+    print("  rosclaw robot validate <robot_id>")
+    return 0
+
+
+def cmd_robot_install(args: argparse.Namespace) -> int:
+    """Install/register a robot from the e-URDF-Zoo."""
+    from rosclaw.runtime import RobotRegistry
+
+    registry = RobotRegistry()
+    robot_id = args.robot_id
+
+    print(f"[ROSClaw] Installing robot: {robot_id} ...")
+    try:
+        profile = registry.install(robot_id)
+        print(f"[ROSClaw] ✅ Installed: {profile.name} ({profile.robot_id})")
+        print(f"[ROSClaw]    Vendor:  {profile.vendor}")
+        print(f"[ROSClaw]    DOF:     {profile.embodiment.dof}")
+        print(f"[ROSClaw]    Links:   {len(profile.embodiment.links)}")
+        print(f"[ROSClaw]    Joints:  {len(profile.embodiment.joints)}")
+        print(f"[ROSClaw]    Sensors: {len(profile.embodiment.sensors)}")
+        return 0
+    except FileNotFoundError as exc:
+        print(f"[ROSClaw] ❌ Installation failed: {exc}")
+        available = registry.list_available()
+        if available:
+            print(f"[ROSClaw] Available robots: {', '.join(available)}")
+        return 1
+
+
+def cmd_robot_inspect(args: argparse.Namespace) -> int:
+    """Show complete robot profile."""
+    import json
+
+    from rosclaw.runtime import RobotRegistry
+
+    registry = RobotRegistry()
+    robot_id = args.robot_id
+
+    try:
+        profile = registry.inspect(robot_id)
+    except FileNotFoundError:
+        print(f"[ROSClaw] ❌ Robot '{robot_id}' not found.")
+        available = registry.list_available()
+        if available:
+            print(f"[ROSClaw] Available: {', '.join(available)}")
+        return 1
+
+    emb = profile["embodiment"]
+    safety = profile["safety"]
+    cap = profile["capability"]
+    sim = profile["simulation"]
+    sem = profile["semantic"]
+
+    print("=" * 60)
+    print(f"Robot Profile: {profile['name']} ({profile['robot_id']})")
+    print("=" * 60)
+    print(f"Vendor:      {profile['vendor']}")
+    print(f"Version:     {profile['version']}")
+    print(f"Description: {profile['description'].strip()}")
+    print()
+    print(f"DOF:         {emb['dof']}")
+    print(f"Links:       {len(emb['links'])}")
+    for link in emb["links"]:
+        print(f"  • {link['name']} ({link.get('type', 'link')}, mass={link.get('mass', 0)}kg)")
+    print()
+    print(f"Joints:      {len(emb['joints'])}")
+    for joint in emb["joints"]:
+        lim = joint.get("limits", {})
+        lim_str = f"[{lim.get('lower', 0):.2f}, {lim.get('upper', 0):.2f}]" if lim else "[-, -]"
+        print(f"  • {joint['name']} ({joint['type']}) limits={lim_str}")
+    print()
+    print(f"Sensors:     {len(emb['sensors'])}")
+    for sensor in emb["sensors"]:
+        print(f"  • {sensor['name']} ({sensor['type']}) on {sensor.get('parent_link', 'N/A')}")
+    print()
+    print(f"Actuators:   {len(emb['actuators'])}")
+    for act in emb["actuators"]:
+        modes = ", ".join(act.get("control_mode", []))
+        print(f"  • {act['name']} ({act['type']}) joint={act.get('joint', 'N/A')} modes=[{modes}]")
+    print()
+    print("Safety Limits:")
+    print(f"  Safety Level: {safety['safety_level']}")
+    if safety.get("pfl"):
+        print(f"  PFL max TCP force: {safety['pfl'].get('max_tcp_force', 'N/A')} N")
+    if safety.get("workspace_boundaries"):
+        print(f"  Workspace: {safety['workspace_boundaries'].get('type', 'N/A')}")
+    print()
+    print("Capabilities:")
+    for capability in cap.get("capabilities", []):
+        category = capability.get("category", capability.get("provider", "skill").split(".")[0])
+        print(f"  • {capability['name']} ({category}) — {capability.get('description', '')}")
+    print()
+    print("Simulation Backends:")
+    for backend_name, backend_cfg in sim.get("backends", {}).items():
+        print(f"  • {backend_name}: {backend_cfg.get('model_file', 'N/A')}")
+    print()
+    print("Semantic Tags:")
+    print(f"  {', '.join(sem.get('semantic_tags', []))}")
+    print("=" * 60)
+
+    if args.json:
+        print("\n--- JSON Output ---")
+        print(json.dumps(profile, indent=2, default=str))
+
+    return 0
+
+
+def cmd_robot_validate(args: argparse.Namespace) -> int:
+    """Validate e-URDF completeness for a robot."""
+    from rosclaw.runtime import RobotRegistry
+
+    registry = RobotRegistry()
+    robot_id = args.robot_id
+
+    print(f"[ROSClaw] Validating e-URDF for: {robot_id} ...")
+    result = registry.validate(robot_id)
+
+    print()
+    print("=" * 50)
+    print(f"Validation Result: {robot_id}")
+    print("=" * 50)
+    print(f"Valid: {'✅ YES' if result['valid'] else '❌ NO'}")
+    print()
+
+    if result["files_found"]:
+        print(f"Files found ({len(result['files_found'])}):")
+        for f in result["files_found"]:
+            print(f"  ✅ {f}")
+
+    if result["files_missing"]:
+        print(f"\nFiles missing ({len(result['files_missing'])}):")
+        for f in result["files_missing"]:
+            print(f"  ❌ {f}")
+
+    if result["warnings"]:
+        print(f"\nWarnings ({len(result['warnings'])}):")
+        for w in result["warnings"]:
+            print(f"  ⚠️  {w}")
+
+    if result["errors"]:
+        print(f"\nErrors ({len(result['errors'])}):")
+        for e in result["errors"]:
+            print(f"  🚫 {e}")
+
+    print("=" * 50)
+    return 0 if result["valid"] else 1
+
+
+# ------------------------------------------------------------------
+# Practice subcommands
+# ------------------------------------------------------------------
+
+
+def _practice_artifacts_dir() -> Path:
+    return get_rosclaw_home() / "artifacts"
+
+
+def _add_practice_data_root_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the shared workspace-aware Practice root option."""
+    parser.add_argument(
+        "--data-root",
+        default=str(get_default_practice_data_root()),
+        help="Practice data root (default: $ROSCLAW_HOME/data/practice)",
+    )
+
+
+def _memory_db_path() -> Path:
+    """Return the default SQLite path for persistent SeekDB memory."""
+    return get_rosclaw_home() / "memory" / "seekdb.sqlite"
+
+
+def _practice_seekdb_client(args: argparse.Namespace) -> Any:
+    """Build the configured Practice SeekDB backend from args or env.
+
+    URL forms:
+
+    - ``seekdb+native://[user[:password]@]host[:port][/database]`` — the real
+      SeekDB / OceanBase server over the native pyseekdb protocol (port 2881);
+    - ``mysql://`` / ``mysql+pymysql://`` / ``seekdb://`` — the experimental
+      MySQL-protocol backend;
+    - no URL — the local SQLite knowledge store (``--seekdb-path``).
+    """
+    import os
+    from urllib.parse import urlparse
+
+    from rosclaw.memory.seekdb_client import SeekDBMySQLClient, SQLiteKnowledgeStore
+
+    seekdb_url = getattr(args, "seekdb_url", None) or os.environ.get("ROSCLAW_SEEKDB_URL")
+    if seekdb_url:
+        if urlparse(seekdb_url).scheme == "seekdb+native":
+            from rosclaw.storage.seekdb_native import SeekDBServerStore
+
+            parsed = urlparse(seekdb_url)
+            database = parsed.path.lstrip("/") or "rosclaw"
+            store = SeekDBServerStore(
+                host=parsed.hostname or "127.0.0.1",
+                port=parsed.port or 2881,
+                user=parsed.username or "root",
+                password=parsed.password or "",
+                database=database,
+            )
+            store.connect()
+            return store
+        return SeekDBMySQLClient(seekdb_url)
+
+    db_path = Path(getattr(args, "seekdb_path", None) or _memory_db_path())
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return SQLiteKnowledgeStore(str(db_path))
+
+
+def cmd_practice_list(args: argparse.Namespace) -> int:
+    """List recorded practice sessions from the local catalog."""
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    layout = PracticeLayout(data_root)
+    catalog = PracticeCatalog(layout.catalog_db_path)
+    records = catalog.list_practices(limit=100)
+
+    if not records:
+        print("No practice sessions found.")
+        print(f"Data root: {layout.data_root}")
+        return 0
+
+    print("=" * 90)
+    print(f"Practice Sessions ({len(records)})")
+    print("=" * 90)
+    print(
+        f"{'Practice ID':<34} {'Status':<10} {'Events':<8} "
+        f"{'Robot':<15} {'Task':<20} {'Start Time'}"
+    )
+    print("-" * 90)
+    for rec in records:
+        event_count = catalog.count_events(rec["practice_id"])
+        start = rec.get("start_time", "N/A") or "N/A"
+        robot = rec.get("robot_id", "N/A") or "N/A"
+        task = rec.get("task_name") or rec.get("task_id") or "N/A"
+        print(
+            f"{rec['practice_id']:<34} "
+            f"{rec.get('outcome', 'UNKNOWN') or 'UNKNOWN':<10} "
+            f"{event_count:<8} "
+            f"{robot:<15} "
+            f"{task:<20} "
+            f"{start}"
+        )
+    print("=" * 90)
+    print("\nCommands:")
+    print("  rosclaw practice show <practice_id>")
+    print("  rosclaw practice replay <practice_id>")
+    print("  rosclaw practice export <practice_id> --format jsonl")
+    return 0
+
+
+def cmd_practice_show(args: argparse.Namespace) -> int:
+    """Show practice episode details from the local episode.json."""
+    practice_id = args.episode_id
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    layout = PracticeLayout(data_root)
+    session_dir = layout.session_dir(practice_id)
+
+    # Support passing a direct path as the episode id.
+    if not session_dir.exists() and Path(practice_id).exists():
+        session_dir = Path(practice_id)
+
+    if not session_dir.exists():
+        print(f"[ROSClaw] Episode '{practice_id}' not found.", file=sys.stderr)
+        return 1
+
+    episode_path = session_dir / "episode.json"
+    if not episode_path.exists():
+        print(f"[ROSClaw] episode.json missing for '{practice_id}'.", file=sys.stderr)
+        return 1
+
+    try:
+        episode = json.loads(episode_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[ROSClaw] Failed to read episode.json: {exc}", file=sys.stderr)
+        return 1
+
+    # Derive per-source counts from the timeline.
+    timeline_path = session_dir / "timeline.jsonl"
+    timeline: list[dict[str, Any]] = []
+    if timeline_path.exists():
+        with open(timeline_path, encoding="utf-8") as f:
+            timeline = [json.loads(line) for line in f if line.strip()]
+
+    camera_frames = sum(1 for ev in timeline if ev.get("event_type") == "rgbd_frame")
+    provider_results = sum(1 for ev in timeline if ev.get("event_type") == "provider.result")
+    sandbox_decisions = sum(1 for ev in timeline if ev.get("event_type") == "decision")
+
+    frames_dir = session_dir / "artifacts" / "frames"
+    color_artifacts = sorted(frames_dir.glob("color_*.png")) if frames_dir.exists() else []
+    depth_artifacts = sorted(frames_dir.glob("depth_*.png")) if frames_dir.exists() else []
+
+    if args.json:
+        print(json.dumps(episode, indent=2, default=str))
+        return 0
+
+    print("=" * 60)
+    print(f"Episode: {practice_id}")
+    print("=" * 60)
+    print(f"Outcome:           {episode.get('outcome', 'UNKNOWN')}")
+    print(f"Robot:             {episode.get('robot_id', 'UNKNOWN')}")
+    print(f"Events:            {episode.get('event_count', len(timeline))}")
+    print(f"Camera frames:     {camera_frames}")
+    print(f"Provider results:  {provider_results}")
+    print(f"Sandbox decisions: {sandbox_decisions}")
+    print("Artifacts:")
+    if color_artifacts:
+        print(f"  color: {color_artifacts[0].relative_to(session_dir)}")
+    else:
+        print("  color: (none)")
+    if depth_artifacts:
+        print(f"  depth: {depth_artifacts[0].relative_to(session_dir)}")
+    else:
+        print("  depth: (none)")
+    if episode.get("failure_labels"):
+        print(f"Failure labels:    {', '.join(episode['failure_labels'])}")
+    print("=" * 60)
+    return 0
+
+
+def cmd_practice_replay(args: argparse.Namespace) -> int:
+    """Replay a practice session by reading its events.jsonl trace."""
+    practice_id = args.episode_id
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    layout = PracticeLayout(data_root)
+    catalog = PracticeCatalog(layout.catalog_db_path)
+    record = catalog.get_practice(practice_id)
+
+    if record is None:
+        print(f"[ROSClaw] Practice '{practice_id}' not found.", file=sys.stderr)
+        return 1
+
+    jsonl_path = layout.events_jsonl_path(practice_id)
+    if not jsonl_path.exists() and record.get("events_jsonl_path"):
+        jsonl_path = Path(record["events_jsonl_path"])
+    if not jsonl_path.exists():
+        print(f"[ROSClaw] No event trace for practice '{practice_id}'.", file=sys.stderr)
+        return 1
+
+    events: list[dict[str, Any]] = []
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+
+    source_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
+    for ev in events:
+        source = ev.get("source", "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        event_type = ev.get("event_type", "unknown")
+        type_counts[event_type] = type_counts.get(event_type, 0) + 1
+
+    print("\n" + "=" * 60)
+    print(f"REPLAY: Practice {practice_id}")
+    print("=" * 60)
+    print(f"Total events: {len(events)}")
+
+    print("\nBy source:")
+    for source, count in sorted(source_counts.items()):
+        print(f"  {source}: {count}")
+
+    print("\nBy event type:")
+    for event_type, count in sorted(type_counts.items()):
+        print(f"  {event_type}: {count}")
+
+    print("\nFirst 5 events:")
+    for ev in events[:5]:
+        ts = ev.get("timestamp_utc", "N/A")
+        print(f"  [{ts}] {ev.get('source', 'unknown')}:{ev.get('event_type', 'unknown')}")
+
+    print("\n" + "=" * 60)
+    return 0
+
+
+def cmd_practice_export(args: argparse.Namespace) -> int:
+    """Export episode metadata or practice events to requested format."""
+    episode_dir_arg = getattr(args, "episode_dir", None)
+    episode_id = episode_dir_arg or args.episode_id
+
+    if args.format == "jsonl":
+        practice_id = args.practice_id or episode_id
+        layout = PracticeLayout(args.data_root)
+        jsonl_path = layout.events_jsonl_path(practice_id)
+        if not jsonl_path.exists():
+            # Fall back to catalog lookup
+            catalog = PracticeCatalog(layout.catalog_db_path)
+            record = catalog.get_practice(practice_id)
+            if record and record.get("events_jsonl_path"):
+                jsonl_path = Path(record["events_jsonl_path"])
+        if not jsonl_path.exists():
+            print(f"[ROSClaw] Practice '{practice_id}' events not found.", file=sys.stderr)
+            return 1
+        out_path = args.output
+        if out_path:
+            shutil.copyfile(jsonl_path, out_path)
+            print(f"[ROSClaw] Exported JSONL to {out_path}")
+        else:
+            with open(jsonl_path, encoding="utf-8") as f:
+                sys.stdout.write(f.read())
+        return 0
+
+    if args.format == "parquet":
+        from rosclaw.practice.exporters import ParquetExporter
+
+        practice_id = args.practice_id or episode_id
+        exporter = ParquetExporter(args.data_root)
+        try:
+            out = exporter.export(practice_id, output_path=args.output)
+            print(f"[ROSClaw] Exported Parquet to {out}")
+            return 0
+        except Exception as e:
+            print(f"[ROSClaw] Parquet export failed: {e}", file=sys.stderr)
+            return 1
+
+    if args.format == "lerobot":
+        practice_id = args.practice_id or episode_id
+        if practice_id:
+            episode_dir = Path(practice_id)
+            if not episode_dir.is_dir():
+                candidate = Path(args.data_root) / practice_id
+                episode_dir = candidate
+                # Practice sessions live under <data_root>/sessions/<id>; fall
+                # back to that layout when the flat path does not resolve.
+                sessions_candidate = Path(args.data_root) / "sessions" / practice_id
+                if not (candidate / "episode.json").exists() and sessions_candidate.is_dir():
+                    episode_dir = sessions_candidate
+            # Rollout-imported sessions carry a frame-level episode built from
+            # the trace; prefer it over the summary-only episode.json.
+            if episode_dir.is_dir():
+                frames_file = episode_dir / "frames_episode.json"
+                if frames_file.exists():
+                    episode_dir = frames_file
+        else:
+            episode_dir = Path(args.data_root)
+
+        has_writer_arg = hasattr(args, "writer")
+        if not has_writer_arg:
+            if episode_dir_arg:
+                from rosclaw.practice.exporters import LeRobotSkeletonExporter
+
+                exporter = LeRobotSkeletonExporter(args.data_root)
+                try:
+                    out = exporter.export(episode_dir_arg, output_path=args.output)
+                    print(f"[ROSClaw] Exported LeRobot dataset skeleton to {out}")
+                    return 0
+                except Exception as e:
+                    print(f"[ROSClaw] LeRobot skeleton export failed: {e}", file=sys.stderr)
+                    return 1
+
+            from rosclaw.practice.exporters import LeRobotExporter
+
+            exporter = LeRobotExporter(args.data_root)
+            try:
+                out = exporter.export(practice_id, output_path=args.output)
+                print(f"[ROSClaw] Exported LeRobot dataset to {out}")
+                return 0
+            except Exception as e:
+                print(f"[ROSClaw] LeRobot export failed: {e}", file=sys.stderr)
+                return 1
+
+        writer = getattr(args, "writer", None)
+        if writer is None:
+            # A positional practice ID is already backed by ROSClaw's
+            # frame-level exporter and does not require the isolated LeRobot
+            # runtime. Keep that established CLI contract; writer selection
+            # below applies to episode-directory imports.
+            if practice_id and not episode_dir_arg:
+                from rosclaw.practice.exporters import LeRobotExporter
+
+                exporter = LeRobotExporter(args.data_root)
+                try:
+                    out = exporter.export(practice_id, output_path=args.output)
+                    print(f"[ROSClaw] Exported LeRobot dataset to {out}")
+                    return 0
+                except Exception as e:
+                    print(f"[ROSClaw] LeRobot export failed: {e}", file=sys.stderr)
+                    return 1
+
+            # Preserve the legacy --episode contract: it explicitly requests
+            # the metadata-only skeleton exporter unless the caller asks for
+            # the real writer.
+            if episode_dir_arg:
+                writer = "skeleton"
+            else:
+                from rosclaw.integrations.lerobot.config import get_configured_lerobot_runtime
+
+                runtime = get_configured_lerobot_runtime()
+                if runtime and runtime.get("subprocess_available"):
+                    writer = "real"
+                else:
+                    writer = "skeleton"
+                    print(
+                        "[ROSClaw] No LeRobot runtime available; falling back to skeleton writer. "
+                        "Use --writer real after `rosclaw setup lerobot`.",
+                        file=sys.stderr,
+                    )
+
+        if writer == "skeleton":
+            if episode_dir_arg or episode_dir.is_dir():
+                from rosclaw.practice.exporters import LeRobotSkeletonExporter
+
+                exporter = LeRobotSkeletonExporter(args.data_root)
+                skeleton_source = (
+                    str(episode_dir.resolve()) if episode_dir.is_dir() else str(episode_dir_arg)
+                )
+                try:
+                    out = exporter.export(skeleton_source, output_path=args.output)
+                    print(f"[ROSClaw] Exported LeRobot dataset skeleton to {out}")
+                    return 0
+                except Exception as e:
+                    print(f"[ROSClaw] LeRobot skeleton export failed: {e}", file=sys.stderr)
+                    return 1
+
+            from rosclaw.practice.exporters import LeRobotExporter
+
+            exporter = LeRobotExporter(args.data_root)
+            try:
+                out = exporter.export(practice_id, output_path=args.output)
+                print(f"[ROSClaw] Exported LeRobot dataset to {out}")
+                return 0
+            except Exception as e:
+                print(f"[ROSClaw] LeRobot export failed: {e}", file=sys.stderr)
+                return 1
+
+        # real writer path
+        if not args.output:
+            print(
+                "[ROSClaw] --output is required for real LeRobot dataset export.", file=sys.stderr
+            )
+            return 1
+        repo_id = args.repo_id or f"local/rosclaw_{episode_dir.name or 'episode'}"
+        include_groups = None
+        if getattr(args, "include_groups", None):
+            include_groups = [g.strip() for g in args.include_groups.split(",") if g.strip()]
+        export_args = argparse.Namespace(
+            episode_id=str(episode_dir),
+            episode_dir=str(episode_dir),
+            output=args.output,
+            repo_id=repo_id,
+            fps=args.fps if args.fps is not None else 10.0,
+            task=args.task,
+            robot_id=args.robot_id,
+            body_profile=args.body_profile,
+            use_videos=args.use_videos,
+            visual_storage_mode=getattr(args, "visual_storage_mode", "auto"),
+            profile=getattr(args, "profile", "minimal"),
+            include_groups=include_groups,
+            include_body_snapshot=getattr(args, "include_body_snapshot", False),
+            body_snapshot_mode=getattr(args, "body_snapshot_mode", "sanitized"),
+            acknowledge_sensitive_body_data=getattr(args, "acknowledge_sensitive_body_data", False),
+            dataloader=getattr(args, "dataloader", False),
+            dry_run=getattr(args, "dry_run", False),
+            allow_partial=getattr(args, "allow_partial", False),
+            missing_policy=getattr(args, "missing_policy", "nan"),
+            timeout_sec=args.timeout_sec,
+            json=args.json if hasattr(args, "json") else False,
+        )
+        return _dispatch_lerobot_cli("cmd_lerobot_export_dataset", export_args)
+
+    from rosclaw.practice.episode_recorder import EpisodeRecorder
+
+    recorder = EpisodeRecorder(
+        "cli", event_bus=None, artifact_base_dir=str(_practice_artifacts_dir())
+    )
+    meta = recorder.get_episode(episode_id)
+
+    if meta is None:
+        print(f"[ROSClaw] Episode '{args.episode_id}' not found.", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        print(json.dumps(meta, indent=2, default=str))
+    else:
+        print(f"Unknown format: {args.format}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _fixture_event_datetime(event: dict[str, Any]):
+    """Return the RuntimeEvent timestamp represented by a fixture event."""
+    from datetime import datetime
+
+    ts_utc = event.get("timestamp_utc")
+    if isinstance(ts_utc, str) and ts_utc:
+        try:
+            return datetime.fromisoformat(ts_utc.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    ts_ns = event.get("timestamp_ns")
+    if isinstance(ts_ns, int):
+        return datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=UTC)
+    return datetime.now(UTC)
+
+
+def cmd_practice_record(args: argparse.Namespace) -> int:
+    """Record a deterministic practice session from a JSON fixture."""
+    from rosclaw.practice.recorder import PracticeRecorder
+    from rosclaw.runtime.bus import RuntimeBus
+    from rosclaw.runtime.event import RuntimeEvent
+
+    fixture_path = Path(args.fixture)
+    data_root_arg = getattr(args, "out", None) or getattr(args, "data_root", None)
+    data_root = resolve_practice_data_root(data_root_arg)
+
+    try:
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[rosclaw-practice] Failed to read fixture {fixture_path}: {exc}", file=sys.stderr)
+        return 1
+
+    events = fixture.get("events")
+    if not isinstance(events, list) or not events:
+        print("[rosclaw-practice] Fixture must contain a non-empty events list.", file=sys.stderr)
+        return 1
+
+    practice_id = fixture.get("practice_id") or f"practice_{int(time.time() * 1000)}"
+    session_id = fixture.get("session_id") or practice_id
+    episode_id = fixture.get("episode_id")
+    robot_id = fixture.get("robot_id") or "fixture_robot"
+    robot_type = fixture.get("robot_type")
+    body_id = fixture.get("body_id")
+    task_id = fixture.get("task_id")
+    task_name = fixture.get("task_name") or task_id
+    skill_id = fixture.get("skill_id")
+    policy_id = fixture.get("policy_id")
+    trace_id = fixture.get("trace_id") or practice_id
+    outcome = fixture.get("outcome", "SUCCESS")
+    reward = fixture.get("reward", 0.0)
+    failure_labels = fixture.get("failure_labels", [])
+    fixture_sources = sorted(
+        {
+            source
+            for event in events
+            if isinstance(event, dict)
+            and (source := event.get("source"))
+            and isinstance(source, str)
+        }
+    )
+    sources = fixture.get("sources") or dict.fromkeys(fixture_sources, True)
+
+    required_fields = ("event_id", "event_type", "trace_id", "timestamp_ns", "timestamp_utc")
+    for idx, event in enumerate(events, 1):
+        if not isinstance(event, dict):
+            print(f"[rosclaw-practice] Fixture event {idx} is not an object.", file=sys.stderr)
+            return 1
+        missing = [field for field in required_fields if event.get(field) in (None, "")]
+        if missing:
+            print(
+                f"[rosclaw-practice] Fixture event {idx} missing required fields: {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 1
+
+    bus = RuntimeBus()
+    recorder = PracticeRecorder(bus, data_root=data_root, publish_to_event_bus=False)
+    recorder.initialize()
+    recorder.start()
+
+    start_ts = _fixture_event_datetime(events[0])
+    bus.publish(
+        RuntimeEvent(
+            id=session_id,
+            timestamp=start_ts,
+            source="practice_fixture",
+            robot=robot_id,
+            body_id=body_id,
+            type="practice.start",
+            payload={
+                "practice_id": practice_id,
+                "session_id": session_id,
+                "episode_id": episode_id,
+                "robot_id": robot_id,
+                "robot_type": robot_type,
+                "task_id": task_id,
+                "task_name": task_name,
+                "skill_id": skill_id,
+                "sources": sources,
+                "seekdb_enabled": False,
+            },
+            metadata={
+                "trace_id": trace_id,
+                "session_metadata": {
+                    "body_id": body_id,
+                    "policy_id": policy_id,
+                    "fixture": str(fixture_path),
+                },
+            },
+        )
+    )
+
+    for raw_event in events:
+        event = dict(raw_event)
+        event.setdefault("schema_version", "practice.event.v1")
+        event.setdefault("practice_id", practice_id)
+        event.setdefault("session_id", session_id)
+        event.setdefault("episode_id", episode_id)
+        event.setdefault("robot_id", robot_id)
+        event.setdefault("body_id", body_id)
+        event.setdefault("task_id", task_id)
+        event.setdefault("skill_id", skill_id)
+
+        bus.publish(
+            RuntimeEvent(
+                id=str(event["event_id"]),
+                timestamp=_fixture_event_datetime(event),
+                source=event.get("source") or "system",
+                robot=event.get("robot_id") or robot_id,
+                body_id=event.get("body_id") or body_id,
+                type=event["event_type"],
+                payload=event,
+                metadata={
+                    "trace_id": event.get("trace_id") or trace_id,
+                    "source": event.get("source") or "system",
+                    "task_id": event.get("task_id") or task_id,
+                    "skill_id": event.get("skill_id") or skill_id,
+                    "action_id": event.get("action_id"),
+                    "frame_id": event.get("frame_id"),
+                    "tags": event.get("tags", []),
+                    "quality": event.get("quality", {}),
+                    "payload_ref": event.get("payload_ref", {}),
+                    "parent_event_id": event.get("parent_event_id"),
+                    "source_timestamp_ns": event.get("source_timestamp_ns"),
+                },
+            )
+        )
+
+    stop_ts = _fixture_event_datetime(events[-1])
+    bus.publish(
+        RuntimeEvent(
+            timestamp=stop_ts,
+            source="practice_fixture",
+            robot=robot_id,
+            body_id=body_id,
+            type="practice.stop",
+            payload={
+                "practice_id": practice_id,
+                "outcome": outcome,
+                "reward": reward,
+                "event_count": len(events),
+                "failure_labels": failure_labels,
+                "sources": sources,
+                "seekdb_enabled": False,
+            },
+            metadata={"trace_id": trace_id},
+        )
+    )
+    recorder.stop()
+
+    summary = {
+        "practice_id": practice_id,
+        "session_id": session_id,
+        "episode_id": episode_id,
+        "event_count": len(events),
+        "data_root": str(data_root),
+        "events_jsonl": str(PracticeLayout(data_root).events_jsonl_path(practice_id)),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(summary, indent=2))
+    else:
+        print("[rosclaw-practice] Recorded fixture practice")
+        for key, value in summary.items():
+            print(f"  {key}: {value}")
+    return 0
+
+
+def _parse_duration(value: str | None) -> float | None:
+    """Parse a human-readable duration into seconds."""
+    if value is None:
+        return None
+    value = value.strip()
+    if value.endswith("ms"):
+        seconds = float(value[:-2]) / 1000.0
+    elif value.endswith("s"):
+        seconds = float(value[:-1])
+    elif value.endswith("m"):
+        seconds = float(value[:-1]) * 60.0
+    elif value.endswith("h"):
+        seconds = float(value[:-1]) * 3600.0
+    else:
+        seconds = float(value)
+    if seconds <= 0:
+        raise ValueError(f"duration must be positive, got {value}")
+    return seconds
+
+
+def _parse_sources(value: str | None) -> SourceConfig:
+    """Parse a comma-separated source list into a SourceConfig.
+
+    An empty or whitespace-only string disables all sources.  When a list is
+    provided, only the named sources are enabled; the dataclass defaults are
+    intentionally cleared so ``--sources runtime`` means *only* runtime.
+    """
+    sources = SourceConfig()
+    # Start from all-False so callers get exactly what they asked for.
+    for name in vars(sources):
+        setattr(sources, name, False)
+
+    if not value or not value.strip():
+        return sources
+    for name in [p.strip() for p in value.split(",") if p.strip()]:
+        if hasattr(sources, name):
+            setattr(sources, name, True)
+    return sources
+
+
+def _resolve_practice_body_id(home: Path, robot: str) -> str:
+    """Resolve ``--robot`` to a registered body id.
+
+    The CLI accepts either a body instance id (e.g. ``d405_latest``) or a
+    robot/profile identifier (e.g. ``realsense-d405``).  When the literal
+    identifier is not a registered body, we fall back to the first workspace
+    body whose profile matches.
+    """
+    from rosclaw.body.registry import BodyRegistryError
+    from rosclaw.body.resolver import BodyResolver
+
+    robot_norm = robot.strip().lower().replace("-", "_")
+
+    # 1. Try literal body id.
+    try:
+        resolver = BodyResolver(workspace=home, body_id=robot)
+        if resolver.is_linked():
+            return robot
+    except BodyRegistryError:
+        pass
+
+    # 2. Fall back to profile id match.
+    for entry in BodyResolver.list_workspace_bodies(home):
+        entry_profile = entry.profile_id.strip().lower().replace("-", "_")
+        if entry_profile == robot_norm:
+            return entry.body_id
+
+    # 3. Return original and let downstream body checks produce a clear error.
+    return robot
+
+
+def _resolve_default_provider(home: Path, capability: str) -> str | None:
+    """Resolve a default provider for the requested capability.
+
+    Resolution order:
+    1. ``ROSCLAW_PRACTICE_DEFAULT_PROVIDER`` environment variable.
+    2. First provider found in the workspace ``providers/`` directory or GPU
+       environment config that advertises ``capability``.
+
+    Returns the provider id, or ``None`` if no default can be found.
+    """
+    import os
+
+    env_default = os.environ.get("ROSCLAW_PRACTICE_DEFAULT_PROVIDER")
+    if env_default:
+        return env_default
+
+    try:
+        from rosclaw.provider.core.registry import ProviderRegistry
+        from rosclaw.provider.loader import ProviderLoader
+
+        registry = ProviderRegistry()
+        loader = ProviderLoader(registry)
+        loader.scan_directory(home / "providers")
+        _register_gpu_providers(registry)
+
+        candidates = registry.find_by_capability(capability, healthy_only=False)
+        if candidates:
+            return candidates[0].manifest.name
+    except Exception:
+        pass
+
+    return None
+
+
+# Default camera skill when a RealSense source is requested without --skill.
+_DEFAULT_CAMERA_SKILL_BY_ROBOT: dict[str, str] = {
+    "realsense-d405": "realsense_capture_rgbd",
+    "realsense_d405": "realsense_capture_rgbd",
+    "realsense-d435i": "realsense_capture_rgbd",
+    "realsense_d435i": "realsense_capture_rgbd",
+    "realsense-dual": "realsense_capture_rgbd",
+    "realsense_dual": "realsense_capture_rgbd",
+}
+
+
+def cmd_practice_init(args: argparse.Namespace) -> int:
+    """Initialize rosclaw-practice configuration for a robot."""
+    config_root = get_rosclaw_home() / "practice"
+    robot_id = args.robot
+    config_root.mkdir(parents=True, exist_ok=True)
+    (config_root / "robots" / robot_id).mkdir(parents=True, exist_ok=True)
+
+    config_path = config_root / "config.yaml"
+    data_root = get_default_practice_data_root()
+    content = f"""# rosclaw-practice global configuration
+data_root: {data_root}
+seekdb:
+  enabled: false
+  url: ""
+  fallback_dir: {data_root / "fallback"}
+"""
+    config_path.write_text(content, encoding="utf-8")
+
+    robot_config = config_root / "robots" / robot_id / "robot.yaml"
+    robot_config.write_text(
+        f"robot_id: {robot_id}\nrobot_type: unknown\n",
+        encoding="utf-8",
+    )
+    print(f"[rosclaw-practice] Initialized for robot '{robot_id}'")
+    print(f"  config: {config_path}")
+    print(f"  robot:  {robot_config}")
+    return 0
+
+
+def cmd_practice_start(args: argparse.Namespace) -> int:
+    """Start a practice session using PracticeCoordinator.
+
+    The session always writes ``runtime.start`` and ``runtime.stop`` when the
+    ``runtime`` source is enabled.  If ``camera`` is requested without an
+    explicit ``--skill``, a default RealSense capture skill is used.  The skill
+    is executed periodically according to ``--sample-hz`` until the requested
+    duration expires or a signal is received.
+    """
+    import signal
+
+    seekdb_enabled = args.seekdb
+    # HTTP bridge URL for the optional rosclaw_practice SeekDB adapter.
+    # Prefer the dedicated env var; fall back to the legacy ROSCLAW_SEEKDB_URL
+    # for backward compatibility, but default to port 2882 to avoid colliding
+    # with the SeekDB SQL protocol on port 2881.
+    seekdb_http_url = os.environ.get("ROSCLAW_PRACTICE_HTTP_ADAPTER_URL")
+    if not seekdb_http_url:
+        legacy_url = os.environ.get("ROSCLAW_SEEKDB_URL")
+        if legacy_url and legacy_url.lower().startswith(("http://", "https://")):
+            seekdb_http_url = legacy_url
+            print(
+                "[rosclaw-practice] Warning: ROSCLAW_SEEKDB_URL is deprecated for the HTTP bridge; "
+                "set ROSCLAW_PRACTICE_HTTP_ADAPTER_URL instead.",
+                file=sys.stderr,
+            )
+    seekdb_http_url = seekdb_http_url or "http://localhost:2882"
+    fallback_dir = os.environ.get(
+        "ROSCLAW_SEEKDB_FALLBACK_DIR",
+        str(get_default_practice_data_root() / "fallback"),
+    )
+    skill_id = getattr(args, "skill", None)
+    provider_id = getattr(args, "provider", None)
+    capability = getattr(args, "capability", "vlm.risk_assessment")
+    sample_hz = getattr(args, "sample_hz", None) or 1.0
+    sample_hz = float(sample_hz)
+    if sample_hz <= 0:
+        sample_hz = 1.0
+
+    try:
+        duration_sec = _parse_duration(args.duration)
+    except ValueError as exc:
+        print(f"[rosclaw-practice] Invalid duration: {exc}", file=sys.stderr)
+        return 1
+
+    sources = _parse_sources(args.sources)
+
+    # If a skill is explicitly requested, force the evidence sources it needs.
+    if skill_id:
+        sources.camera = True
+        sources.provider = sources.provider or bool(provider_id)
+        sources.sandbox = True
+        sources.runtime = True
+        sources.agent = False
+
+    home = get_rosclaw_home()
+    resolved_body_id = _resolve_practice_body_id(home, args.robot)
+
+    # Default camera skill for RealSense bodies when camera source is enabled.
+    if sources.camera and not skill_id:
+        robot_norm = args.robot.strip().lower()
+        skill_id = _DEFAULT_CAMERA_SKILL_BY_ROBOT.get(robot_norm)
+        if not skill_id:
+            # Fall back to the registered body's profile id.
+            try:
+                from rosclaw.body.resolver import BodyResolver
+                from rosclaw.body.schema import EurdfProfile
+
+                resolver = BodyResolver(workspace=home, body_id=resolved_body_id)
+                if resolver.is_linked() and resolver.eurdf_profile_path.exists():
+                    profile = EurdfProfile.from_yaml(resolver.eurdf_profile_path)
+                    profile_norm = profile.profile_id.strip().lower()
+                    skill_id = _DEFAULT_CAMERA_SKILL_BY_ROBOT.get(profile_norm)
+            except Exception:
+                pass
+        if skill_id:
+            print(
+                f"[rosclaw-practice] No --skill provided; using default camera skill "
+                f"'{skill_id}' for {args.robot}."
+            )
+
+    if sources.camera and not skill_id:
+        print(
+            "[rosclaw-practice] camera source requires --skill or a registered camera source adapter.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Default provider selection when provider source is enabled.
+    if provider_id:
+        sources.provider = True
+    elif sources.provider:
+        provider_id = _resolve_default_provider(home, capability)
+        if provider_id:
+            print(
+                f"[rosclaw-practice] No --provider provided; using default provider "
+                f"'{provider_id}' for capability '{capability}'."
+            )
+        else:
+            print(
+                "[rosclaw-practice] provider source requires --provider, "
+                "ROSCLAW_PRACTICE_DEFAULT_PROVIDER, or a registered provider "
+                f"supporting '{capability}'.",
+                file=sys.stderr,
+            )
+            return 1
+
+    config = PracticeConfig(
+        robot_id=resolved_body_id,
+        robot_type=args.robot_type,
+        task_id=args.task,
+        task_name=args.task,
+        skill_id=skill_id,
+        data_root=args.data_root,
+        sources=sources,
+        mock=args.mock,
+        duration_sec=duration_sec,
+        sample_hz=sample_hz,
+        publish_to_event_bus=True,
+    )
+    config.seekdb.enabled = seekdb_enabled
+    config.seekdb.http_adapter_url = seekdb_http_url if seekdb_enabled else None
+    config.seekdb.fallback_dir = fallback_dir
+    # Only treat ROSCLAW_SEEKDB_URL as a SQL DSN for post-session ingestion.
+    sql_url = os.environ.get("ROSCLAW_SEEKDB_URL")
+    if sql_url and str(sql_url).lower().startswith(("mysql://", "seekdb://", "sqlite://")):
+        config.seekdb.url = sql_url
+
+    coordinator = PracticeCoordinator(config)
+    coordinator.initialize()
+
+    recorder = None
+    bridge = None
+    if seekdb_enabled:
+        try:
+            from rosclaw.firstboot.config import load_rosclaw_yaml
+            from rosclaw.practice.episode_recorder import EpisodeRecorder
+            from rosclaw.practice.seekdb_bridge import SeekDBBridge
+            from rosclaw.storage.outbox import OutboxStore
+
+            yaml_cfg = load_rosclaw_yaml(home) or {}
+            storage_cfg = yaml_cfg.get("storage", {})
+            outbox_enabled = bool(storage_cfg.get("outbox_enabled", False))
+            outbox_path = storage_cfg.get("outbox_path") or str(home / "storage" / "outbox.sqlite")
+            outbox_max_records = int(storage_cfg.get("outbox_max_records", 100_000))
+            outbox_flush_interval_sec = float(storage_cfg.get("outbox_flush_interval_sec", 5.0))
+            outbox_batch_size = int(storage_cfg.get("outbox_batch_size", 100))
+
+            outbox: OutboxStore | None = None
+            if outbox_enabled:
+                outbox = OutboxStore(
+                    db_path=outbox_path,
+                    max_records=outbox_max_records,
+                )
+
+            bridge = SeekDBBridge(
+                seekdb_url=seekdb_http_url,
+                fallback_dir=fallback_dir,
+                outbox=outbox,
+                outbox_interval_sec=outbox_flush_interval_sec,
+                outbox_batch_size=outbox_batch_size,
+            )
+            recorder = EpisodeRecorder(
+                robot_id=resolved_body_id,
+                event_bus=coordinator.event_bus,
+                seekdb_bridge=bridge,
+            )
+            recorder.initialize()
+        except Exception as exc:
+            print(f"[rosclaw-practice] SeekDB recorder unavailable: {exc}", file=sys.stderr)
+
+    coordinator.start()
+
+    practice_id = coordinator.session.practice_id if coordinator.session else "unknown"
+    pid_file = get_rosclaw_home() / "practice" / "coordinator.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(f"{os.getpid()}\n{practice_id}\n", encoding="utf-8")
+
+    print(f"[rosclaw-practice] Started session {practice_id}")
+
+    stop_requested = False
+
+    def _handle_signal(signum, frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    # Execute the capture skill periodically for the requested duration.
+    if skill_id:
+        interval = 1.0 / sample_hz
+        next_run = time.time()
+        deadline = time.time() + duration_sec if duration_sec else None
+        iteration = 0
+        while not stop_requested and (deadline is None or time.time() < deadline):
+            now = time.time()
+            if now >= next_run:
+                result = _run_practice_skill_iteration(
+                    coordinator,
+                    home=home,
+                    robot_id=resolved_body_id,
+                    skill_id=skill_id,
+                    provider_id=provider_id,
+                    capability=capability,
+                    task_id=args.task,
+                    robot_type=args.robot_type,
+                    data_root=args.data_root,
+                    iteration_index=iteration,
+                )
+                if result != 0:
+                    coordinator.record_failure(["skill_failure"])
+                    print(
+                        f"[rosclaw-practice] Skill iteration {iteration} failed; stopping session.",
+                        file=sys.stderr,
+                    )
+                    break
+                iteration += 1
+                next_run += interval
+            time.sleep(0.05)
+    else:
+        try:
+            if config.duration_sec:
+                deadline = time.time() + config.duration_sec
+                while not stop_requested and time.time() < deadline:
+                    time.sleep(0.1)
+            else:
+                while not stop_requested:
+                    time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+
+    coordinator.stop()
+    if recorder is not None:
+        recorder.stop()
+    if bridge is not None:
+        bridge.close()
+    if pid_file.exists():
+        pid_file.unlink()
+
+    summary = coordinator.summary
+    if summary:
+        print(f"[rosclaw-practice] Stopped {summary.practice_id}")
+        print(f"  events:   {summary.event_count}")
+        print(f"  duration:  {summary.duration_ms:.1f} ms")
+        print(f"  outcome:   {summary.outcome}")
+        print(f"  artifacts: {summary.artifact_dir}")
+    return 0
+
+
+def _image_dimensions(path: str) -> tuple[int, int]:
+    """Return image (width, height) without heavy dependencies."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        pass
+    # Fallback: parse PNG IHDR chunk.
+    try:
+        with open(path, "rb") as fh:
+            header = fh.read(24)
+        if len(header) == 24 and header[:8] == b"\x89PNG\r\n\x1a\n" and header[12:16] == b"IHDR":
+            width = int.from_bytes(header[16:20], "big")
+            height = int.from_bytes(header[20:24], "big")
+            return (width, height)
+    except Exception:
+        pass
+    return (0, 0)
+
+
+def _relative_artifact_ref(path: str | None, base_dir: Path) -> str | None:
+    """Return a path relative to the session dir, or an absolute path if outside."""
+    if not path:
+        return None
+    try:
+        p = Path(path).resolve()
+        base = base_dir.resolve()
+        return str(p.relative_to(base))
+    except Exception:
+        return str(Path(path).resolve())
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC timestamp as an ISO-8601 string."""
+    from datetime import datetime
+
+    return datetime.now(UTC).isoformat()
+
+
+def _run_practice_skill_iteration(
+    coordinator: "PracticeCoordinator",
+    home: Path,
+    robot_id: str,
+    skill_id: str,
+    provider_id: str | None = None,
+    capability: str = "vlm.risk_assessment",
+    task_id: str | None = None,
+    robot_type: str | None = None,
+    data_root: str | Path | None = None,
+    iteration_index: int = 0,
+) -> int:
+    """Execute one skill iteration and emit practice events into a live session.
+
+    The coordinator session must already be started.  This helper emits
+    ``skill.start``, ``skill.result``, ``camera.rgbd_frame``, provider
+    request/result (when ``provider_id`` is given), and ``sandbox.decision``
+    events.  Runtime start/stop are owned by the coordinator lifecycle.
+
+    Returns 0 on success, 1 on failure.
+    """
+    from pathlib import Path
+
+    from rosclaw.body.resolver import BodyNotLinkedError, BodyResolver
+    from rosclaw.practice.schemas import (
+        PracticeEventEnvelope,
+        ProviderOutputPayload,
+        RGBDFramePayload,
+        SandboxDecisionPayload,
+    )
+    from rosclaw.skill.builtins import load_builtins
+    from rosclaw.skill_manager.executor import SkillExecutor
+    from rosclaw.skill_manager.registry import SkillRegistry
+
+    try:
+        resolver = BodyResolver(workspace=home, body_id=robot_id)
+        if not resolver.is_linked():
+            raise BodyNotLinkedError(
+                f"Body '{robot_id}' is not linked. Run: rosclaw body init --robot realsense-d405 --name {robot_id}"
+            )
+    except Exception as exc:
+        print(f"[rosclaw-practice] Body check failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        from rosclaw.body.schema import EurdfProfile
+
+        eurdf_profile = EurdfProfile.from_yaml(resolver.eurdf_profile_path)
+        profile_id = eurdf_profile.profile_id
+    except Exception as exc:
+        print(f"[rosclaw-practice] Failed to resolve body profile: {exc}", file=sys.stderr)
+        return 1
+
+    if coordinator.session is None:
+        print("[rosclaw-practice] Session not started.", file=sys.stderr)
+        return 1
+
+    practice_id = coordinator.session.practice_id
+    session_dir = coordinator.session.session_dir
+    skill_output_dir = session_dir / "artifacts" / "skill"
+    skill_output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _emit(
+        source: str,
+        event_type: str,
+        payload: dict[str, Any],
+        tags: list[str] | None = None,
+        parent_event_id: str | None = None,
+    ) -> str:
+        event = PracticeEventEnvelope(
+            practice_id=practice_id,
+            robot_id=robot_id,
+            source=source,
+            event_type=event_type,
+            skill_id=skill_id,
+            trace_id=practice_id,
+            payload=payload,
+            tags=tags or [],
+            parent_event_id=parent_event_id,
+        )
+        coordinator.emit_event(event)
+        return event.event_id
+
+    registry = SkillRegistry(event_bus=coordinator.event_bus)
+    load_builtins(registry)
+    if registry.get(skill_id) is None:
+        print(f"[rosclaw-practice] Skill not found: {skill_id}", file=sys.stderr)
+        return 1
+
+    executor = SkillExecutor(
+        event_bus=coordinator.event_bus,
+        registry=registry,
+        body_resolver=resolver,
+    )
+    skill_params = {
+        "body_id": robot_id,
+        "workspace": str(home),
+        "output_dir": str(skill_output_dir),
+    }
+
+    print(f"[rosclaw-practice] Running skill: {skill_id}")
+    skill_result = executor.execute(skill_id, parameters=skill_params)
+    skill_status = skill_result.get("status") if isinstance(skill_result, dict) else "error"
+    handler_result = skill_result.get("handler_result") if isinstance(skill_result, dict) else None
+    if skill_status not in ("success", "degraded"):
+        reason = None
+        if isinstance(skill_result, dict):
+            reason = skill_result.get("reason") or (
+                handler_result.get("reason") if isinstance(handler_result, dict) else None
+            )
+        print(
+            f"[rosclaw-practice] Skill failed: {skill_id} ({skill_status}){f' — {reason}' if reason else ''}",
+            file=sys.stderr,
+        )
+        return 1
+
+    artifacts = handler_result.get("artifacts", {}) if isinstance(handler_result, dict) else {}
+    color_path = artifacts.get("color") or artifacts.get("color_path") or artifacts.get("save_path")
+    depth_path = artifacts.get("depth") or artifacts.get("depth_path")
+
+    if not color_path or not Path(color_path).exists():
+        print("[rosclaw-practice] No color frame artifact captured.", file=sys.stderr)
+        return 1
+
+    # ------------------------------------------------------------------
+    # skill.start
+    # ------------------------------------------------------------------
+    _emit(
+        "runtime",
+        "skill.start",
+        {"skill": skill_id, "params": skill_params},
+        tags=["skill", "start", skill_id],
+    )
+
+    # ------------------------------------------------------------------
+    # skill.result
+    # ------------------------------------------------------------------
+    _emit(
+        "runtime",
+        "skill.result",
+        {
+            "skill": skill_id,
+            "status": skill_status,
+            "artifacts": artifacts,
+            "metrics": handler_result.get("metrics", {}) if handler_result else {},
+            "server_name": handler_result.get("server_name") if handler_result else None,
+            "tool": handler_result.get("tool") if handler_result else None,
+        },
+        tags=["skill", "result", skill_id, skill_status],
+    )
+
+    # ------------------------------------------------------------------
+    # Copy artifacts into episode/artifacts/frames
+    # ------------------------------------------------------------------
+    frames_dir = session_dir / "artifacts" / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    existing_color_frames = len(list(frames_dir.glob("color_*.png")))
+    sequence = max(iteration_index + 1, existing_color_frames + 1)
+
+    def _copy_frame(src: str | None, suffix: str) -> str | None:
+        nonlocal sequence
+        if not src:
+            return None
+        src_path = Path(src)
+        if not src_path.exists():
+            return None
+        dst = frames_dir / f"{suffix}_{sequence:06d}.png"
+        import shutil
+
+        shutil.copy2(src_path, dst)
+        sequence += 1
+        return _relative_artifact_ref(str(dst), session_dir)
+
+    color_ref = _copy_frame(color_path, "color")
+    depth_ref = _copy_frame(depth_path, "depth") if depth_path else None
+
+    # ------------------------------------------------------------------
+    # camera.rgbd_frame
+    # ------------------------------------------------------------------
+    width, height = _image_dimensions(color_path)
+    frame_payload = RGBDFramePayload(
+        camera_id=robot_id,
+        width=width,
+        height=height,
+        rgb_encoding="png",
+        depth_encoding="png16" if depth_ref else "none",
+        rgb_ref=color_ref
+        or _relative_artifact_ref(color_path, session_dir)
+        or str(Path(color_path).resolve()),
+        depth_ref=depth_ref,
+    )
+    _emit(
+        "camera",
+        "rgbd_frame",
+        frame_payload.model_dump(),
+        tags=["rgbd", "realsense", skill_id],
+    )
+
+    # ------------------------------------------------------------------
+    # Provider inference on the color frame
+    # ------------------------------------------------------------------
+    provider_event_id: str | None = None
+    if provider_id and color_path and Path(color_path).exists():
+        provider_dir = session_dir / "provider"
+        provider_dir.mkdir(parents=True, exist_ok=True)
+        provider_out = provider_dir / f"provider_result_{iteration_index:06d}.json"
+        requests_jsonl = provider_dir / "requests.jsonl"
+        responses_jsonl = provider_dir / "responses.jsonl"
+        question = "Analyze physical risks in this RealSense image."
+
+        request_event_id = f"{practice_id}_provider_request_{iteration_index:06d}"
+        request_record = {
+            "event_id": request_event_id,
+            "provider": provider_id,
+            "capability": capability,
+            "input_artifact": color_ref,
+            "question": question,
+            "timestamp": _utc_now_iso(),
+        }
+        with requests_jsonl.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(request_record) + "\n")
+
+        prov_args = argparse.Namespace(
+            provider_id=provider_id,
+            provider_id_opt=None,
+            input="{}",
+            capability=capability,
+            question=question,
+            image_path=str(color_path),
+            output_path=str(provider_out),
+            json=True,
+            trace_id=practice_id,
+        )
+        print(f"[rosclaw-practice] Calling provider: {provider_id}")
+        cmd_provider_invoke(prov_args)
+        try:
+            provider_data = json.loads(provider_out.read_text(encoding="utf-8"))
+        except Exception as exc:
+            provider_data = {"normalized": {}, "latency_ms": 0, "errors": [str(exc)]}
+
+        response_record = {
+            "event_id": f"{practice_id}_provider_response_{iteration_index:06d}",
+            "provider": provider_id,
+            "input_artifact": color_ref,
+            "request_event_id": request_event_id,
+            "response_path": _relative_artifact_ref(str(provider_out), session_dir),
+            "timestamp": _utc_now_iso(),
+            "result": provider_data,
+        }
+        with responses_jsonl.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(response_record) + "\n")
+
+        normalized = provider_data.get("normalized", {})
+        provider_event_id = _emit(
+            "provider",
+            "provider.request",
+            {
+                "provider": provider_id,
+                "capability": capability,
+                "input_artifact": color_ref,
+                "question": question,
+                "request_event_id": request_record["event_id"],
+            },
+            tags=["provider", "request", provider_id, skill_id],
+        )
+        provider_event_id = _emit(
+            "provider",
+            "provider.result",
+            ProviderOutputPayload(
+                provider_id=provider_id,
+                provider_type="vlm",
+                model=provider_id,
+                route_reason="practice_run",
+                input_summary={"image": color_ref},
+                output_summary=normalized,
+                latency_ms=provider_data.get("latency_ms", 0),
+                token_usage=None,
+                confidence=None,
+                status="fallback" if normalized.get("fallback_parse") else "success",
+            ).model_dump(),
+            tags=["provider", "result", provider_id, skill_id],
+            parent_event_id=provider_event_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Sandbox decision
+    # ------------------------------------------------------------------
+    sandbox_action = {"type": "provider_reasoning" if provider_id else "capture_rgbd"}
+    sandbox_result = _evaluate_sandbox_policy(profile_id, sandbox_action)
+    sandbox_payload = SandboxDecisionPayload(
+        decision_id=f"{practice_id}_sandbox_{iteration_index:06d}",
+        action_id=skill_id,
+        requested_action=sandbox_action,
+        decision=sandbox_result["decision"],
+        modified_action=None,
+        risk_score=0.85 if sandbox_result["decision"] == "BLOCK" else 0.0,
+        rules_triggered=[],
+        simulation_ref=None,
+        reason=sandbox_result["reason"],
+        policy_version="perception_only_v1",
+        latency_ms=0.0,
+    )
+    _emit(
+        "sandbox",
+        "decision",
+        sandbox_payload.model_dump(),
+        tags=["sandbox", sandbox_result["decision"], skill_id],
+        parent_event_id=provider_event_id,
+    )
+
+    print(f"[rosclaw-practice] Captured frame: {color_ref}")
+    return 0
+
+
+def cmd_practice_run(args: argparse.Namespace) -> int:
+    """Run a single skill+provider practice episode and record real events.
+
+    Example:
+        rosclaw practice run --robot d405_lab_01 \
+            --skill realsense_capture_rgbd \
+            --provider cosmos-reason2-lan \
+            --output-root ./episode
+    """
+    from rosclaw.firstboot.workspace import resolve_home
+    from rosclaw.practice.config import PracticeConfig, SourceConfig
+    from rosclaw.practice.coordinator import PracticeCoordinator
+
+    home = resolve_home(getattr(args, "workspace", None))
+    robot_id = args.robot
+    skill_id = args.skill
+    provider_id = getattr(args, "provider", None)
+    capability = getattr(args, "capability", "vlm.risk_assessment")
+    data_root = resolve_practice_data_root(
+        getattr(args, "output_root", None) or getattr(args, "data_root", None)
+    )
+
+    resolved_body_id = _resolve_practice_body_id(home, robot_id)
+
+    sources = SourceConfig(
+        camera=True,
+        provider=bool(provider_id),
+        sandbox=True,
+        runtime=True,
+        agent=False,
+    )
+    config = PracticeConfig(
+        robot_id=resolved_body_id,
+        robot_type=getattr(args, "robot_type", None),
+        task_id=getattr(args, "task", None),
+        task_name=getattr(args, "task", None),
+        skill_id=skill_id,
+        data_root=data_root,
+        sources=sources,
+        mock=False,
+        publish_to_event_bus=True,
+    )
+
+    coordinator = PracticeCoordinator(config)
+    coordinator.initialize()
+    coordinator.start()
+
+    result = _run_practice_skill_iteration(
+        coordinator,
+        home=home,
+        robot_id=resolved_body_id,
+        skill_id=skill_id,
+        provider_id=provider_id,
+        capability=capability,
+        task_id=getattr(args, "task", None),
+        robot_type=getattr(args, "robot_type", None),
+        data_root=data_root,
+    )
+
+    if result != 0:
+        coordinator.record_failure(["skill_failure"])
+        coordinator.stop()
+        return 1
+
+    coordinator.stop()
+
+    summary = coordinator.summary
+    outcome = summary.outcome if summary else "UNKNOWN"
+
+    if getattr(args, "json", False):
+        print(json.dumps(summary.__dict__ if summary else {}, indent=2, default=str))
+    else:
+        print("\n[rosclaw-practice] Run complete")
+        if summary:
+            print(f"  practice_id: {summary.practice_id}")
+            print(f"  robot:       {summary.robot_id}")
+            print(f"  events:      {summary.event_count}")
+            print(f"  duration:    {summary.duration_ms:.1f} ms")
+            print(f"  outcome:     {summary.outcome}")
+            print(f"  session_dir: {summary.artifact_dir}")
+            if summary.failure_labels:
+                print(f"  failure_labels: {summary.failure_labels}")
+
+    return 0 if outcome == "SUCCESS" else 1
+
+
+def cmd_practice_validate(args: argparse.Namespace) -> int:
+    """Validate a recorded practice episode on disk.
+
+    Checks that the session directory, episode.json, manifest.yaml,
+    events.jsonl, and timeline.jsonl exist and are consistent.  In strict
+    mode the episode must contain camera, provider, and sandbox events.
+    """
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    episode_id = args.episode_id
+    strict = getattr(args, "strict", False)
+
+    layout = PracticeLayout(data_root)
+    session_dir = layout.session_dir(episode_id)
+
+    # Support passing a direct path as the episode id.
+    if not session_dir.exists() and Path(episode_id).exists():
+        session_dir = Path(episode_id)
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks: dict[str, Any] = {}
+
+    if not session_dir.exists():
+        errors.append(f"session directory not found: {session_dir}")
+        result = {
+            "valid": False,
+            "episode_id": episode_id,
+            "session_dir": str(session_dir),
+            "errors": errors,
+            "warnings": warnings,
+            "checks": checks,
+        }
+        _print_practice_validate(args, result)
+        return 1
+
+    episode_path = session_dir / "episode.json"
+    manifest_path = session_dir / "manifest.yaml"
+    events_path = session_dir / "raw" / "events.jsonl"
+    timeline_path = session_dir / "timeline.jsonl"
+
+    checks["session_dir"] = str(session_dir)
+    checks["episode_json_exists"] = episode_path.exists()
+    checks["manifest_yaml_exists"] = manifest_path.exists()
+    checks["events_jsonl_exists"] = events_path.exists()
+    checks["timeline_jsonl_exists"] = timeline_path.exists()
+
+    if not episode_path.exists():
+        errors.append(f"missing episode.json: {episode_path}")
+        episode: dict[str, Any] = {}
+    else:
+        try:
+            episode = json.loads(episode_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            errors.append(f"failed to parse episode.json: {exc}")
+            episode = {}
+
+    if not manifest_path.exists():
+        errors.append(f"missing manifest.yaml: {manifest_path}")
+
+    events: list[dict[str, Any]] = []
+    if not events_path.exists():
+        errors.append(f"missing events.jsonl: {events_path}")
+    else:
+        try:
+            with open(events_path, encoding="utf-8") as f:
+                events = [json.loads(line) for line in f if line.strip()]
+        except Exception as exc:
+            errors.append(f"failed to parse events.jsonl: {exc}")
+
+    timeline: list[dict[str, Any]] = []
+    if not timeline_path.exists():
+        warnings.append(
+            f"missing timeline.jsonl: {timeline_path} (events.jsonl is the canonical stream)"
+        )
+    else:
+        try:
+            with open(timeline_path, encoding="utf-8") as f:
+                timeline = [json.loads(line) for line in f if line.strip()]
+        except Exception as exc:
+            warnings.append(f"failed to parse timeline.jsonl: {exc}")
+
+    # timeline.jsonl is deprecated; derive checks from the canonical events.jsonl.
+    check_events = timeline if timeline else events
+    event_count = episode.get("event_count", len(events))
+    checks["event_count"] = event_count
+    checks["timeline_count"] = len(timeline)
+
+    if event_count == 0:
+        errors.append("episode contains zero events")
+
+    outcome = episode.get("outcome", "UNKNOWN")
+    checks["outcome"] = outcome
+    if outcome == "FAILED":
+        errors.append(f"episode outcome is FAILED: {episode.get('failure_labels', [])}")
+    elif outcome != "SUCCESS":
+        warnings.append(f"episode outcome is not SUCCESS: {outcome}")
+
+    if timeline and len(timeline) != len(events):
+        warnings.append(
+            f"timeline count ({len(timeline)}) does not match events count ({len(events)})"
+        )
+
+    # Event-type and source checks.
+    timeline_types = {ev.get("event_type") for ev in check_events}
+    checks["event_types"] = sorted(timeline_types)
+    if "runtime.start" not in timeline_types:
+        errors.append("missing runtime.start event")
+    if "runtime.stop" not in timeline_types:
+        errors.append("missing runtime.stop event")
+
+    sources = episode.get("sources", {}) if episode else {}
+    checks["sources_requested"] = sources
+    if sources.get("camera") and "rgbd_frame" not in timeline_types:
+        errors.append("camera source enabled but no camera.rgbd_frame event")
+    if sources.get("provider") and "provider.result" not in timeline_types:
+        errors.append("provider source enabled but no provider.result event")
+    if sources.get("sandbox") and "decision" not in timeline_types:
+        errors.append("sandbox source enabled but no sandbox.decision event")
+
+    # Artifact existence checks.
+    if sources.get("camera"):
+        frames_dir = session_dir / "artifacts" / "frames"
+        color_frames = list(frames_dir.glob("color_*.png")) if frames_dir.exists() else []
+        depth_frames = list(frames_dir.glob("depth_*.png")) if frames_dir.exists() else []
+        checks["color_frame_count"] = len(color_frames)
+        checks["depth_frame_count"] = len(depth_frames)
+        if not color_frames:
+            errors.append("camera source enabled but no color frame artifact found")
+        if not depth_frames:
+            warnings.append("no depth frame artifact found")
+    else:
+        checks["color_frame_count"] = 0
+        checks["depth_frame_count"] = 0
+
+    if strict:
+        present_sources = {ev.get("source") for ev in events}
+        checks["sources_present"] = sorted(present_sources)
+        if "camera" not in present_sources:
+            errors.append("strict validation requires a camera event")
+        if "sandbox" not in present_sources:
+            errors.append("strict validation requires a sandbox event")
+        if "provider" not in present_sources:
+            errors.append("strict validation requires a provider event")
+
+    valid = len(errors) == 0
+    result: dict[str, Any] = {
+        "valid": valid,
+        "episode_id": episode_id,
+        "session_dir": str(session_dir),
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks,
+    }
+    _print_practice_validate(args, result)
+    return 0 if valid else 1
+
+
+def _print_practice_validate(args: argparse.Namespace, result: dict[str, Any]) -> None:
+    """Print validation report as JSON or human-readable text."""
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str))
+        return
+
+    print("=" * 60)
+    print("Practice Episode Validation")
+    print("=" * 60)
+    print(f"Episode ID: {result['episode_id']}")
+    print(f"Session:    {result['session_dir']}")
+    print(f"Valid:      {'✅ YES' if result['valid'] else '❌ NO'}")
+    print("-" * 60)
+    checks = result.get("checks", {})
+    if checks:
+        print("Checks:")
+        for key, value in checks.items():
+            print(f"  {key}: {value}")
+    if result.get("errors"):
+        print(f"\nErrors ({len(result['errors'])}):")
+        for err in result["errors"]:
+            print(f"  🚫 {err}")
+    if result.get("warnings"):
+        print(f"\nWarnings ({len(result['warnings'])}):")
+        for warn in result["warnings"]:
+            print(f"  ⚠️  {warn}")
+    print("=" * 60)
+
+
+def normalize_practice_id(practice_id: str) -> str:
+    """Accept a session directory path as well as a bare practice id.
+
+    The catalog keys on the id (the directory name), so an existing
+    directory path must normalize to its basename; anything else passes
+    through unchanged.
+    """
+    candidate = Path(practice_id).expanduser()
+    if candidate.is_dir():
+        return candidate.resolve().name
+    return practice_id
+
+
+def cmd_practice_verify(args: argparse.Namespace) -> int:
+    """Verify closed-loop integrity of a practice session."""
+    from rosclaw.practice.verifier import PracticeVerifier, format_report
+
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    practice_id = normalize_practice_id(args.practice_id)
+    strict = getattr(args, "strict", False)
+
+    verifier = PracticeVerifier(data_root)
+    report = verifier.verify(practice_id, strict=strict)
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "practice_id": report.practice_id,
+                    "passed": report.passed,
+                    "strict": report.strict,
+                    "checked": report.checked,
+                    "issues": [
+                        {"level": i.level, "scope": i.scope, "message": i.message}
+                        for i in report.issues
+                    ],
+                },
+                indent=2,
+                default=str,
+            )
+        )
+    else:
+        print(format_report(report))
+
+    return 0 if report.passed else 1
+
+
+def cmd_practice_distill(args: argparse.Namespace) -> int:
+    """Distill raw practice events into knowledge artifacts."""
+    from rosclaw.practice.distiller import PracticeDistiller
+
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    practice_id = args.practice_id
+    body_id = getattr(args, "body_id", None)
+    write_artifacts = not getattr(args, "no_artifacts", False)
+
+    distiller = PracticeDistiller(data_root)
+    try:
+        result = distiller.distill(practice_id, body_id=body_id, write_artifacts=write_artifacts)
+    except ValueError as e:
+        print(f"[rosclaw-practice] Distillation failed: {e}", file=sys.stderr)
+        return 1
+
+    summary = {
+        "practice_id": result.practice_id,
+        "session_id": result.session_id,
+        "episode_id": result.episode_id,
+        "body_cognition_traits": result.body_cognition.get("known_traits", []),
+        "failure_count": len(result.failures),
+        "how_intervention_count": len(result.how_interventions),
+        "candidate_count": len(result.candidates),
+        "promotion_result_count": len(result.promotion_results),
+        "sim2real_delta_count": len(result.sim2real_deltas),
+        "artifact_refs": result.artifact_refs,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(summary, indent=2, default=str))
+    else:
+        print("=" * 60)
+        print("Practice Distillation")
+        print("=" * 60)
+        for key, value in summary.items():
+            print(f"  {key}: {value}")
+        print("=" * 60)
+
+    return 0
+
+
+def cmd_practice_ingest_seekdb(args: argparse.Namespace) -> int:
+    """Ingest a distilled practice session into SeekDB."""
+    from rosclaw.practice.seekdb_ingestor import SeekDBIngestor
+
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+    practice_id = args.practice_id
+
+    try:
+        client = _practice_seekdb_client(args)
+        ingestor = SeekDBIngestor(data_root, seekdb_client=client)
+    except Exception as e:
+        print(f"[rosclaw-practice] SeekDB connection failed: {e}", file=sys.stderr)
+        return 1
+    try:
+        report = ingestor.ingest_practice(practice_id)
+    except ValueError as e:
+        print(f"[rosclaw-practice] Ingest failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        ingestor.close()
+
+    summary = {
+        "practice_id": report.practice_id,
+        "episode_id": report.episode_id,
+        "success": report.success,
+        "table_counts": report.table_counts,
+        "total_records": report.total_records,
+        "errors": report.errors,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(summary, indent=2, default=str))
+    else:
+        print("=" * 60)
+        print("SeekDB Ingestion Report")
+        print("=" * 60)
+        print(f"  practice_id: {report.practice_id}")
+        print(f"  episode_id: {report.episode_id}")
+        print(f"  success: {report.success}")
+        print(f"  total_records: {report.total_records}")
+        print("  table_counts:")
+        for table, count in report.table_counts.items():
+            print(f"    {table}: {count}")
+        if report.errors:
+            print("  errors:")
+            for err in report.errors:
+                print(f"    - {err}")
+        print("=" * 60)
+
+    return 0 if report.success else 1
+
+
+def cmd_practice_query(args: argparse.Namespace) -> int:
+    """Query practice episodes, failures, body cognition, sim2real, candidates, and interventions."""
+    from rosclaw.practice.query import PracticeQuery
+
+    data_root = resolve_practice_data_root(getattr(args, "data_root", None))
+
+    try:
+        client = _practice_seekdb_client(args)
+        query = PracticeQuery(data_root, seekdb_client=client)
+    except Exception as e:
+        print(f"[rosclaw-practice] Query backend unavailable: {e}", file=sys.stderr)
+        return 1
+    try:
+        command = args.query_command
+        if command == "episodes":
+            results = query.list_episodes(
+                body_id=getattr(args, "body_id", None),
+                skill_id=getattr(args, "skill_id", None),
+                outcome=getattr(args, "outcome", None),
+                limit=getattr(args, "limit", 100),
+            )
+        elif command == "failures":
+            results = query.list_failures(
+                body_id=getattr(args, "body_id", None),
+                failure_type=getattr(args, "failure_type", None),
+                robot_id=getattr(args, "robot_id", None),
+                limit=getattr(args, "limit", 100),
+            )
+        elif command == "body-cognition":
+            results = query.list_body_cognition(
+                body_id=getattr(args, "body_id", None),
+                cognition_type=getattr(args, "cognition_type", None),
+                limit=getattr(args, "limit", 100),
+            )
+        elif command == "sim2real":
+            results = query.list_sim2real_deltas(
+                body_id=getattr(args, "body_id", None),
+                limit=getattr(args, "limit", 100),
+            )
+        elif command == "candidates":
+            results = query.list_candidates(
+                skill_id=getattr(args, "skill_id", None),
+                status=getattr(args, "status", None),
+                policy_id=getattr(args, "policy_id", None),
+                limit=getattr(args, "limit", 100),
+            )
+        elif command == "interventions":
+            results = query.list_how_interventions(
+                failure_type=getattr(args, "failure_type", None),
+                failure_id=getattr(args, "failure_id", None),
+                outcome=getattr(args, "outcome", None),
+                limit=getattr(args, "limit", 100),
+            )
+        elif command == "explain-episode":
+            results = query.explain_episode(args.episode_id)
+        elif command == "explain-failure":
+            results = query.explain_failure(args.failure_id)
+        else:
+            print("Unknown query command.", file=sys.stderr)
+            return 1
+    finally:
+        query.close()
+
+    if getattr(args, "json", False):
+        print(json.dumps(results, indent=2, default=str))
+    else:
+        _print_query_results(results, command)
+
+    return 0
+
+
+def _print_query_results(results: Any, command: str) -> None:
+    if isinstance(results, dict):
+        print("=" * 60)
+        print(f"Query result: {command}")
+        print("=" * 60)
+        print(json.dumps(results, indent=2, default=str))
+        return
+
+    print("=" * 60)
+    print(f"Query results: {command} ({len(results)})")
+    print("=" * 60)
+    for i, record in enumerate(results, 1):
+        print(f"[{i}] {record.get('id') or record.get('episode_id')}")
+        for key, value in record.items():
+            if key in ("metadata", "data", "payload"):
+                continue
+            print(f"    {key}: {value}")
+    print("=" * 60)
+
+
+def cmd_practice_stop(args: argparse.Namespace) -> int:
+    """Stop the running practice coordinator."""
+    import os
+    import signal
+
+    pid_file = get_rosclaw_home() / "practice" / "coordinator.pid"
+    if not pid_file.exists():
+        print("[rosclaw-practice] No running coordinator found.", file=sys.stderr)
+        return 1
+
+    lines = pid_file.read_text(encoding="utf-8").strip().splitlines()
+    try:
+        pid = int(lines[0])
+        running_practice_id = lines[1] if len(lines) > 1 else None
+    except (ValueError, IndexError):
+        print("[rosclaw-practice] Invalid PID file.", file=sys.stderr)
+        return 1
+
+    requested_id = getattr(args, "practice_id", None)
+    if requested_id and running_practice_id and requested_id != running_practice_id:
+        print(
+            f"[rosclaw-practice] Running session is {running_practice_id}, not {requested_id}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"[rosclaw-practice] Sent stop signal to coordinator (PID {pid}).")
+    except ProcessLookupError:
+        print(f"[rosclaw-practice] Coordinator PID {pid} not found.", file=sys.stderr)
+        pid_file.unlink()
+        return 1
+    return 0
+
+
+def cmd_practice_sync_fallback(args: argparse.Namespace) -> int:
+    """Re-submit fallback JSON files to SeekDB."""
+    http_url = (
+        args.seekdb_url
+        or os.environ.get("ROSCLAW_PRACTICE_HTTP_ADAPTER_URL")
+        or os.environ.get("ROSCLAW_SEEKDB_URL", "http://localhost:2882")
+    )
+    fallback_dir = args.fallback_dir or os.environ.get(
+        "ROSCLAW_SEEKDB_FALLBACK_DIR",
+        str(get_default_practice_data_root() / "fallback"),
+    )
+    sync = FallbackSync(seekdb_url=http_url, fallback_dir=fallback_dir)
+    summary = sync.sync()
+    print(
+        f"[rosclaw-practice] Fallback sync: attempted={summary['attempted']} "
+        f"success={summary['success']} failed={summary['failed']}"
+    )
+    for err in summary["errors"]:
+        print(f"  ERROR: {err}", file=sys.stderr)
+    return 0 if summary["failed"] == 0 else 1
+
+
+# Keep original export available; add jsonl support below.
+
+
+def _register_cli_builtin_provider(registry: Any, provider_id: str) -> None:
+    """Register a directly invokable built-in provider for the CLI."""
+    if provider_id.lower() != "deepseek":
+        return
+
+    from rosclaw.provider.builtins.deepseek import DeepSeekProvider
+    from rosclaw.provider.core.manifest import ProviderManifest
+
+    manifest = ProviderManifest.from_dict(
+        {
+            "name": "deepseek",
+            "version": "1.0.0",
+            "type": "llm",
+            "capabilities": ["llm.task_planning", "llm.summary", "llm.chat"],
+            "modalities": {"input": ["text"], "output": ["text"]},
+            "runtime": {
+                "backend": "http",
+                "protocol": "openai-compatible",
+                "endpoint": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            },
+            "safety": {
+                "executable": False,
+                "requires_guard": False,
+            },
+        }
+    )
+    registry.register(manifest, lambda item: DeepSeekProvider(item), auto_load=False)
+
+
+def cmd_provider_invoke(args: argparse.Namespace) -> int:
+    """Invoke a provider capability with optional image and normalization."""
+    import base64
+    import time
+    from pathlib import Path
+
+    from rosclaw.core.async_utils import run_sync
+    from rosclaw.provider.core.errors import ProviderNotFoundError
+    from rosclaw.provider.core.provider import ProviderRequest
+    from rosclaw.provider.core.registry import ProviderRegistry
+    from rosclaw.provider.core.response import ProviderResponse
+    from rosclaw.provider.normalizer import ProviderResultNormalizer
+
+    provider_id = args.provider_id or args.provider_id_opt
+    input_data = args.input or "{}"
+
+    if not provider_id:
+        print("[ROSClaw] Provider identifier is required.")
+        return 1
+
+    try:
+        input_payload = json.loads(input_data)
+    except json.JSONDecodeError:
+        input_payload = {"text": input_data}
+
+    if args.question:
+        input_payload.setdefault("question", args.question)
+
+    image_b64: str | None = None
+    image_mime = "image/png"
+    if args.image_path:
+        image_path = Path(args.image_path).expanduser().resolve()
+        if not image_path.exists():
+            print(f"[ROSClaw] Image not found: {image_path}")
+            return 1
+        image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        image_mime = "image/jpeg" if image_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+
+    print(f"[ROSClaw] Invoking provider: {provider_id}")
+    print(f"[ROSClaw] Capability: {args.capability or 'default'}")
+
+    response: ProviderResponse | None = None
+    raw_text = ""
+    error = ""
+    t0 = time.time()
+
+    try:
+        registry = ProviderRegistry()
+        _register_cli_builtin_provider(registry, provider_id)
+        try:
+            provider = registry.get(provider_id)
+        except ProviderNotFoundError:
+            provider = None
+
+        if provider is None:
+            # Auto-register GPU providers from environment/config.
+            _register_gpu_providers(registry)
+            try:
+                provider = registry.get(provider_id)
+            except ProviderNotFoundError:
+                provider = None
+
+        if provider is not None:
+            request = ProviderRequest(
+                request_id=args.trace_id or f"provider_{provider_id}_{int(t0)}",
+                capability=args.capability or "invoke",
+                inputs={
+                    **input_payload,
+                    **({"image": image_b64, "image_mime": image_mime} if image_b64 else {}),
+                },
+            )
+            response = run_sync(provider.infer(request))
+            raw_text = json.dumps(response.result, ensure_ascii=False) if response.result else ""
+            if not response.is_ok:
+                error = (
+                    response.errors[0]
+                    if response.errors
+                    else str(response.result.get("error", f"provider status: {response.status}"))
+                )
+        else:
+            # PhysicalReasoner abstraction: works for Cosmos/Gemini/Qwen and
+            # falls back gracefully when the endpoint is not reachable.
+
+            reasoner = registry.get_reasoner(provider_id)
+            response = reasoner.reason(
+                question=input_payload.get("question", ""),
+                image=image_b64,
+                image_mime=image_mime,
+                capability=args.capability or "vlm.risk_assessment",
+            )
+            raw_text = json.dumps(response.result, ensure_ascii=False) if response.result else ""
+    except Exception as exc:
+        error = str(exc)
+        raw_text = json.dumps(
+            {
+                "scene": "unknown",
+                "objects": [],
+                "physical_risks": [
+                    {"description": f"Provider invocation failed: {exc}", "severity": "error"}
+                ],
+                "risk_score": None,
+                "executable": False,
+                "requires_guard": True,
+                "reasoning": str(exc),
+            },
+            ensure_ascii=False,
+        )
+
+    latency_ms = int((time.time() - t0) * 1000)
+    normalized = ProviderResultNormalizer.normalize(
+        raw_text, capability=args.capability or "vlm.risk_assessment"
+    )
+
+    result = {
+        "provider_id": provider_id,
+        "capability": args.capability,
+        "input": input_payload,
+        "image": bool(image_b64),
+        "status": response.status if response is not None else ("failed" if error else "ok"),
+        "errors": [error] if error else (response.errors if response else []),
+        "latency_ms": response.latency_ms
+        if response and response.latency_ms is not None
+        else latency_ms,
+        "raw": raw_text,
+        "normalized": normalized.to_dict(),
+        "trace_id": args.trace_id or f"trace_{provider_id}_{int(time.time())}",
+    }
+
+    if args.output_path:
+        out_path = Path(args.output_path).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[ROSClaw] Provider result written to: {out_path}")
+
+    if args.json or args.output_path:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("\n[ROSClaw] Provider invocation result:")
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0 if not error else 1
+
+
+def _register_gpu_providers(registry: ProviderRegistry) -> None:
+    """Register GPU providers from environment variables when available."""
+    import os
+
+    from rosclaw.provider.adapters.generic import GenericProvider
+    from rosclaw.provider.core.manifest import ProviderManifest
+
+    gpu_configs = [
+        {
+            "name": "gpu_cosmos",
+            "endpoint": os.environ.get("COSMOS_ENDPOINT", "http://localhost:8004"),
+            "capabilities": [
+                "reasoning.physical",
+                "reasoning.risk_explain",
+                "critic.risk",
+                "world.risk",
+                "vlm.risk_assessment",
+            ],
+            "type": "reasoning",
+            "modalities": {"input": ["image", "text"], "output": ["text", "risk_score"]},
+        },
+        {
+            "name": "gpu_minicpm",
+            "endpoint": os.environ.get("MINICPM_ENDPOINT", "http://localhost:8003"),
+            "capabilities": ["vlm.vqa", "vlm.scene_understanding", "vlm.object_grounding"],
+            "type": "vlm",
+            "modalities": {"input": ["image", "text"], "output": ["text", "bbox"]},
+        },
+        {
+            "name": "gpu_vggt",
+            "endpoint": os.environ.get("VGGT_ENDPOINT", "http://localhost:8002"),
+            "capabilities": ["geometry.depth", "geometry.pose", "geometry.point_cloud"],
+            "type": "geometry",
+            "modalities": {"input": ["image"], "output": ["depth", "pointcloud", "pose"]},
+        },
+    ]
+
+    for cfg in gpu_configs:
+        endpoint = cfg["endpoint"]
+        if not endpoint:
+            continue
+        try:
+            manifest = ProviderManifest.from_dict(
+                {
+                    "name": cfg["name"],
+                    "version": "1.0.0",
+                    "type": cfg["type"],
+                    "capabilities": cfg["capabilities"],
+                    "modalities": cfg["modalities"],
+                    "runtime": {
+                        "backend": "http",
+                        "protocol": "http",
+                        "endpoint": endpoint,
+                        "device": "cuda",
+                    },
+                    "safety": {"executable": False, "requires_guard": True},
+                }
+            )
+            registry.register(manifest, lambda m: GenericProvider(m), auto_load=False)
+        except Exception:
+            pass
+
+
+def _resolve_provider_endpoint(provider_id: str) -> str | None:
+    """Resolve a direct HTTP endpoint for known providers from environment."""
+    import os
+
+    env_map = {
+        "gpu_cosmos": "COSMOS_ENDPOINT",
+        "cosmos": "COSMOS_ENDPOINT",
+        "cosmos-reason2-lan": "COSMOS_ENDPOINT",
+        "gpu_minicpm": "MINICPM_ENDPOINT",
+        "minicpm": "MINICPM_ENDPOINT",
+        "gpu_vggt": "VGGT_ENDPOINT",
+        "vggt": "VGGT_ENDPOINT",
+    }
+    env_var = env_map.get(provider_id.lower())
+    if env_var:
+        return os.environ.get(env_var)
+    return None
+
+
+def _call_provider_http(
+    endpoint: str,
+    provider_id: str,
+    capability: str | None,
+    input_payload: dict[str, Any],
+    image_b64: str | None,
+    image_mime: str,
+) -> str:
+    """Call a provider HTTP endpoint and return the response text."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    inputs = dict(input_payload)
+    payload = {
+        "provider": provider_id,
+        "capability": capability,
+        "inputs": inputs,
+    }
+    if image_b64:
+        inputs["image"] = f"data:{image_mime};base64,{image_b64}"
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/infer",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Provider HTTP error {exc.code}: {body}") from exc
+
+
+def cmd_provider_diagnose(args: argparse.Namespace) -> int:
+    """Diagnose provider interfaces against the current effective body."""
+    from rosclaw.body.resolver import BodyNotLinkedError, BodyResolver
+    from rosclaw.firstboot.workspace import resolve_home
+    from rosclaw.provider.body_binder import ProviderBodyBinder
+
+    workspace = resolve_home(args.workspace)
+    body_id = args.body if args.body and args.body != "current" else None
+    try:
+        resolver = BodyResolver(workspace=workspace, body_id=body_id)
+        if not resolver.is_linked():
+            print("[ROSClaw] No body linked. Run: rosclaw body link-eurdf <profile_id>")
+            return 1
+        body = resolver.get_effective_body()
+    except BodyNotLinkedError:
+        print("[ROSClaw] No body linked. Run: rosclaw body link-eurdf <profile_id>")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ROSClaw] Failed to load body: {exc}")
+        return 1
+
+    binder = ProviderBodyBinder.from_effective_body(body)
+    available = set(args.available) if getattr(args, "available", None) else None
+    diagnosis = binder.diagnose(available=available)
+    diagnosis_dict = diagnosis.to_dict()
+
+    if args.json:
+        print(json.dumps(diagnosis_dict, indent=2, default=str))
+        return 0
+
+    print("=" * 60)
+    print("ROSClaw Provider Diagnosis")
+    print("=" * 60)
+    print(f"Body instance: {diagnosis.body_instance_id}")
+    print(f"Effective body hash: {diagnosis.effective_body_hash}")
+    print(f"Status: {diagnosis.status}")
+    print("-" * 60)
+    print(f"{'Interface':<30} {'Required':<10} {'Status':<12} {'Error'}")
+    print("-" * 60)
+    for name, iface in sorted(diagnosis.interfaces.items()):
+        required = "yes" if iface.get("required") else "no"
+        status = iface.get("status", "unknown")
+        error = iface.get("error") or ""
+        print(f"{name:<30} {required:<10} {status:<12} {error}")
+    print("=" * 60)
+    summary = diagnosis.summary
+    if summary:
+        print(
+            f"Summary: available={summary.get('available', 0)} "
+            f"unavailable={summary.get('unavailable', 0)} "
+            f"degraded={summary.get('degraded', 0)} "
+            f"unknown={summary.get('unknown', 0)}"
+        )
+    return 0
+
+
+def cmd_skill_invoke(args: argparse.Namespace) -> int:
+    """Invoke a skill through SkillExecutor with builtin handler injection."""
+    from rosclaw.body.resolver import BodyResolver
+    from rosclaw.core.event_bus import get_global_event_bus
+    from rosclaw.firstboot.workspace import resolve_home
+    from rosclaw.skill.builtins import load_builtins
+    from rosclaw.skill_manager.executor import SkillExecutor
+    from rosclaw.skill_manager.registry import SkillRegistry
+
+    skill_id = args.skill_id
+    input_data = args.input or "{}"
+
+    try:
+        input_payload = json.loads(input_data)
+    except json.JSONDecodeError:
+        input_payload = {"target": input_data}
+
+    if args.body_id:
+        input_payload.setdefault("body_id", args.body_id)
+    if args.output_dir:
+        input_payload.setdefault("output_dir", args.output_dir)
+    if args.workspace:
+        input_payload.setdefault("workspace", args.workspace)
+
+    print(f"[ROSClaw] Invoking skill: {skill_id}")
+    if input_payload:
+        print(f"[ROSClaw] Input: {json.dumps(input_payload, indent=2)}")
+
+    try:
+        registry = SkillRegistry()
+        _, loaded = load_builtins(registry)
+        if not registry.get(skill_id):
+            # Fallback to the auto-register path for legacy builtins/providers.
+            _, _skills = _auto_register_builtins()
+            for entry in _skills:
+                if getattr(entry, "name", "") == skill_id and not registry.get(skill_id):
+                    registry.register(entry)
+
+        if registry.get(skill_id) is None:
+            available = sorted(registry.list_skills())
+            print(f"[ROSClaw] Skill '{skill_id}' not found.")
+            print(f"[ROSClaw] Available: {', '.join(available) if available else 'none'}")
+            return 1
+
+        workspace = resolve_home(args.workspace)
+        body_id = args.body_id if args.body_id and args.body_id != "current" else None
+        body_resolver = BodyResolver(workspace=workspace, body_id=body_id)
+
+        event_bus = get_global_event_bus()
+        executor = SkillExecutor(
+            event_bus=event_bus,
+            registry=registry,
+            body_resolver=body_resolver,
+        )
+        result = executor.execute(skill_id, parameters=input_payload)
+
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print("\n[ROSClaw] Skill invocation result:")
+            print(json.dumps(result, indent=2, default=str))
+        return 0 if result.get("status") in ("success", "dispatched") else 1
+
+    except Exception as exc:
+        print(f"[ROSClaw] Skill invocation failed: {exc}")
+        return 1
+
+
+def cmd_skill_check(args: argparse.Namespace) -> int:
+    """Check skill availability and body compatibility."""
+    from rosclaw.body.resolver import BodyNotLinkedError, BodyResolver
+
+    if args.all:
+        return _cmd_skill_check_all(args)
+
+    skill_id = args.skill_id
+    if skill_id is None:
+        print("[ROSClaw] Error: skill_id is required unless --all is used.")
+        return 1
+
+    _, skills = _auto_register_builtins()
+    by_name = {getattr(s, "name", ""): s for s in skills}
+    entry = by_name.get(skill_id)
+
+    # Also look for a workspace skill manifest if the skill is not builtin.
+    if entry is None:
+        try:
+            resolver = BodyResolver(resolve_home())
+            manifest = resolver._load_skill_manifest(skill_id, None)
+            if manifest is not None:
+                from types import SimpleNamespace
+
+                entry = SimpleNamespace(
+                    name=skill_id,
+                    skill_type=getattr(manifest, "skill_type", "manifest"),
+                    version=getattr(manifest, "skill_version", "1.0.0"),
+                )
+        except Exception:
+            pass
+
+    if entry is None:
+        available = sorted(by_name.keys())
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "skill_id": skill_id,
+                        "found": False,
+                        "status": "not_found",
+                        "available": available,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"[ROSClaw] Skill '{skill_id}' not found.")
+            print(f"[ROSClaw] Available: {', '.join(available) if available else 'none'}")
+        return 1
+
+    # Optional body compatibility check (read-only / safe)
+    compatibility: dict[str, Any] | None = None
+    try:
+        resolver = BodyResolver(resolve_home())
+        if resolver.is_linked():
+            result = resolver.check_skill_compatibility(
+                skill_id, getattr(entry, "version", "1.0.0")
+            )
+            compatibility = (
+                result.to_dict() if hasattr(result, "to_dict") else {"status": str(result)}
+            )
+    except BodyNotLinkedError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        compatibility = {"status": "error", "reason": str(exc)}
+
+    comp_status = compatibility.get("status", "unknown") if compatibility else "unknown"
+    if comp_status == "blocked":
+        status = "blocked"
+    elif comp_status == "degraded":
+        status = "degraded"
+    else:
+        status = "ok"
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "skill_id": skill_id,
+                    "found": True,
+                    "status": status,
+                    "skill_type": getattr(entry, "skill_type", "unknown"),
+                    "version": getattr(entry, "version", "1.0.0"),
+                    "compatibility": compatibility,
+                },
+                indent=2,
+                default=str,
+            )
+        )
+    else:
+        print(f"[ROSClaw] Checking skill: {skill_id}")
+        print(
+            f"Skill '{skill_id}@{getattr(entry, 'version', '1.0.0')}' is available "
+            f"(type={getattr(entry, 'skill_type', 'unknown')})"
+        )
+        if compatibility is None:
+            print("Body compatibility: unknown (no body linked)")
+        else:
+            print(f"Body compatibility: {comp_status}")
+            reason = compatibility.get("reason", "")
+            if reason:
+                print(f"  Reason: {reason}")
+            missing = compatibility.get("missing_requirements", [])
+            if missing:
+                print(f"  Missing requirements: {', '.join(missing)}")
+
+    return 0
+
+
+def _cmd_skill_check_all(args: argparse.Namespace) -> int:
+    """Check all discovered skill manifests against the current body."""
+    from rosclaw.body.resolver import BodyNotLinkedError, BodyResolver
+
+    try:
+        resolver = BodyResolver(resolve_home())
+        if not resolver.is_linked():
+            if args.json:
+                print(json.dumps({"error": "No body linked"}, indent=2))
+            else:
+                print("[ROSClaw] No body linked. Run: rosclaw body link-eurdf <profile_id>")
+            return 1
+        _, report = resolver.refresh_all_artifacts()
+    except BodyNotLinkedError:
+        if args.json:
+            print(json.dumps({"error": "No body linked"}, indent=2))
+        else:
+            print("[ROSClaw] No body linked. Run: rosclaw body link-eurdf <profile_id>")
+        return 1
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+        return 0
+
+    print("Skill compatibility")
+    print(f"  body: {report.body_instance_id or 'current'}")
+    print(f"  hash: {report.effective_body_hash}")
+    if not report.skills:
+        print("  No skill manifests found.")
+        return 0
+    for key in sorted(report.skills):
+        result = report.skills[key]
+        print(f"  {key} ... {result.status}")
+    return 0
+
+
+def cmd_skill_champions_list(_args: argparse.Namespace) -> int:
+    """List current champion skills."""
+    from rosclaw.skill_manager.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    champions = registry.list_champions()
+    if not champions:
+        print("No champion skills found.")
+        return 0
+    print(f"Champion skills: {len(champions)}")
+    for champ in champions:
+        print(
+            f"  {champ.name}@{champ.version} | level={champ.champion_level} | lineage={champ.lineage_id}"
+        )
+    return 0
+
+
+def cmd_skill_lineage(args: argparse.Namespace) -> int:
+    """Show skill lineage."""
+    from rosclaw.skill_manager.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    lineage = registry.list_lineage(args.skill_id)
+    if not lineage:
+        print(f"No lineage found for '{args.skill_id}'")
+        return 1
+    print(f"Skill lineage for '{args.skill_id}':")
+    for entry in lineage:
+        print(
+            f"  {entry.get('name', 'unknown')}@{entry.get('version', '?')} | level={entry.get('champion_level', '?')}"
+        )
+    return 0
+
+
+def cmd_skill_rollback(args: argparse.Namespace) -> int:
+    """Rollback skill to a specific version."""
+    # Try new skill-hub rollback if a local package exists.
+    from rosclaw.skill.cli import _resolve_skill_dir
+    from rosclaw.skill.models import SkillPackage
+    from rosclaw.skill.rollback import rollback_skill
+
+    skill_dir = _resolve_skill_dir(args.skill_id)
+    if skill_dir.exists() and (skill_dir / "lineage.yaml").exists():
+        pkg = SkillPackage(skill_dir).try_load()
+        try:
+            result = rollback_skill(pkg, to_version=args.to, reason="")
+            print(f"Rolled back '{args.skill_id}' to version {args.to}")
+            print(f"  evidence: {result.get('evidence')}")
+            return 0
+        except ValueError as exc:
+            print(f"Skill hub rollback failed: {exc}; falling back to runtime registry")
+
+    from rosclaw.skill_manager.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    ok = registry.rollback(args.skill_id, args.to)
+    if ok:
+        print(f"Rolled back '{args.skill_id}' to version {args.to}")
+    else:
+        print(f"Rollback failed for '{args.skill_id}' to {args.to}")
+    return 0 if ok else 1
+
+
+def cmd_auto_init(args: argparse.Namespace) -> int:
+    """Initialize an auto task (proxy to rosclaw.auto.cli)."""
+    from rosclaw.auto.cli import main as auto_main
+
+    argv = ["init"]
+    if getattr(args, "task", None):
+        argv.extend(["--task", args.task])
+    if getattr(args, "robot", None):
+        argv.extend(["--robot", args.robot])
+    if getattr(args, "skill", None):
+        argv.extend(["--skill", args.skill])
+    if getattr(args, "env", None):
+        argv.extend(["--env", args.env])
+    return auto_main(argv)
+
+
+def cmd_auto_run(args: argparse.Namespace) -> int:
+    """Run auto evolution (proxy to rosclaw.auto.cli)."""
+    from rosclaw.auto.cli import main as auto_main
+
+    argv = ["run"]
+    if getattr(args, "task", None):
+        argv.extend(["--task", args.task])
+    # Support --episodes as alias for --rounds
+    rounds = getattr(args, "rounds", 10)
+    if getattr(args, "episodes", None) is not None:
+        rounds = args.episodes
+    argv.extend(["--rounds", str(rounds)])
+    if getattr(args, "dry_run", False):
+        argv.append("--dry-run")
+    if getattr(args, "policy", None):
+        argv.extend(["--policy", args.policy])
+    return auto_main(argv)
+
+
+def cmd_auto_status(args: argparse.Namespace) -> int:
+    """Show auto status (proxy to rosclaw.auto.cli)."""
+    from rosclaw.auto.cli import main as auto_main
+
+    argv = ["status"]
+    if getattr(args, "task", None):
+        argv.extend(["--task", args.task])
+    return auto_main(argv)
+
+
+def cmd_auto_champion(args: argparse.Namespace) -> int:
+    """Show current champion (proxy to rosclaw.auto.cli)."""
+    from rosclaw.auto.cli import main as auto_main
+
+    argv = ["champion", "--task", args.task]
+    return auto_main(argv)
+
+
+def cmd_auto_deadends(args: argparse.Namespace) -> int:
+    """List dead ends (proxy to rosclaw.auto.cli)."""
+    from rosclaw.auto.cli import main as auto_main
+
+    argv = ["deadends"]
+    if getattr(args, "task", None):
+        argv.extend(["--task", args.task])
+    return auto_main(argv)
+
+
+def cmd_auto_report(args: argparse.Namespace) -> int:
+    """Generate evolution report (proxy to rosclaw.auto.cli)."""
+    from rosclaw.auto.cli import main as auto_main
+
+    argv = ["report", "--task", args.task]
+    if getattr(args, "output", None):
+        argv.extend(["--output", args.output])
+    if getattr(args, "format", None):
+        argv.extend(["--format", args.format])
+    return auto_main(argv)
+
+
+def cmd_how_explain(args: argparse.Namespace) -> int:
+    """Explain a failure episode via HOW."""
+    from rosclaw.how.engine import HeuristicEngine
+    from rosclaw.memory.interface import MemoryInterface
+
+    episode_id = args.episode_id
+    print(f"[ROSClaw] HOW explaining episode: {episode_id}")
+
+    try:
+        mem = MemoryInterface("cli")
+        mem._do_initialize()
+
+        # Try to find the episode in memory
+        failure = mem.explain_last_failure()
+
+        # Generate recovery suggestion via HOW
+        how = HeuristicEngine(seekdb_client=_MockSeekDB())
+        import asyncio
+
+        async def _explain():
+            return await how.suggest_recovery(
+                f"Episode {episode_id} failure analysis",
+                context={"episode_id": episode_id},
+            )
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        recovery = loop.run_until_complete(_explain())
+        loop.close()
+
+        print("\n[ROSClaw] HOW Explanation:")
+        print(f"  Episode:     {episode_id}")
+        print(f"  Failure:     {failure.get('failure_type', 'N/A') if failure else 'N/A'}")
+        print(f"  Root Cause:  {failure.get('root_cause', 'N/A') if failure else 'N/A'}")
+        print(f"  Recovery:    {recovery.get('action', 'N/A')}")
+        print(f"  Confidence:  {recovery.get('priority', 'N/A')}")
+        return 0
+
+    except Exception as exc:
+        print(f"[ROSClaw] HOW explain failed: {exc}")
+        return 1
+
+
+def cmd_how_recover(args: argparse.Namespace) -> int:
+    """Generate recovery plan for an episode."""
+    from rosclaw.how.engine import HeuristicEngine
+
+    episode_id = args.episode_id
+    print(f"[ROSClaw] HOW generating recovery for episode: {episode_id}")
+
+    try:
+        how = HeuristicEngine(seekdb_client=_MockSeekDB())
+        import asyncio
+
+        async def _recover():
+            return await how.suggest_recovery(
+                f"Episode {episode_id} requires recovery",
+                context={"episode_id": episode_id, "generate_plan": True},
+            )
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        recovery = loop.run_until_complete(_recover())
+        loop.close()
+
+        # Detect PID-related failures and generate specific recovery patches
+        failure_type = "unknown"
+        root_cause = "Analysis pending"
+        patch = {"action": recovery.get("action", "N/A"), "priority": recovery.get("priority", 0)}
+
+        if "pid" in episode_id.lower() or "oscill" in str(recovery.get("action", "")).lower():
+            failure_type = "pid_oscillation"
+            root_cause = "High Kp or missing Kd damping causes oscillation"
+            patch = {
+                "action": "retry_with_adjusted_pid",
+                "parameter_patch": {
+                    "Kp": "reduce by 50% (e.g., 10.0 → 2.0)",
+                    "Kd": "add damping (0.5–1.0)",
+                    "Ki": "add small integral (0.05–0.1) to eliminate steady-state error",
+                },
+                "expected_improvement": "Reduced overshoot, faster settling",
+            }
+        elif "grasp" in episode_id.lower() or "grip" in str(recovery.get("action", "")).lower():
+            failure_type = "grasp_failure"
+            root_cause = "Insufficient grip force or misaligned approach"
+            patch = {
+                "action": "retry_with_adjusted_grasp",
+                "parameter_patch": {
+                    "gripper_force": "increase by 20%",
+                    "approach_height": "increase by 2cm",
+                    "lateral_speed": "reduce to 80%",
+                },
+            }
+
+        result = {
+            "episode_id": episode_id,
+            "failure_type": failure_type,
+            "root_cause": root_cause,
+            "suggested_patch": patch,
+            "confidence": 0.85 if failure_type != "unknown" else 0.7,
+            "evidence": [episode_id],
+        }
+
+        print("\n[ROSClaw] HOW Recovery Plan:")
+        print(json.dumps(result, indent=2, default=str))
+
+        if args.output:
+            Path(args.output).write_text(
+                json.dumps(result, indent=2, default=str), encoding="utf-8"
+            )
+            print(f"\n[ROSClaw] Recovery plan written to: {args.output}")
+
+        return 0
+
+    except Exception as exc:
+        print(f"[ROSClaw] HOW recover failed: {exc}")
+        return 1
+
+
+def cmd_how_advise(args: argparse.Namespace) -> int:
+    """Advise on a failure using episode evidence and heuristic rules."""
+    import asyncio
+
+    from rosclaw.how.engine import HeuristicEngine
+    from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
+
+    body_id = args.body
+    failure = args.failure
+    episode_id = args.episode_id
+    data_root = str(resolve_practice_data_root(getattr(args, "data_root", None)))
+
+    async def _run() -> dict:
+        engine = HeuristicEngine(seekdb_client=InMemoryKnowledgeStore())
+        await engine.initialize()
+        return await engine.advise(
+            body_id=body_id,
+            failure=failure,
+            episode_id=episode_id,
+            data_root=data_root,
+        )
+
+    try:
+        result = asyncio.run(_run())
+    except Exception as exc:
+        print(f"[ROSClaw] HOW advise failed: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print("=" * 60)
+        print("ROSClaw HOW — Evidence-backed Intervention")
+        print("=" * 60)
+        print(f"Body:        {result['body_id']}")
+        print(f"Failure:     {result['failure']}")
+        print(f"Episode:     {result['episode_id']}")
+        print(f"Events:      {result['evidence']['event_count']}")
+        print(f"Sources:     {', '.join(result['evidence']['sources'])}")
+        intervention = result["intervention"]
+        print(f"Rule:        {intervention.get('rule_id', 'N/A')}")
+        print(f"Action:      {intervention.get('action', 'N/A')}")
+        print(f"Priority:    {intervention.get('priority', 'N/A')}")
+        print("=" * 60)
+    return 0
+
+
+def cmd_provider_health(args: argparse.Namespace) -> int:
+    """Report the safe built-in provider catalog health contract."""
+    providers = _builtin_provider_contracts()
+    provider_id = getattr(args, "provider_id", None)
+    if provider_id:
+        providers = [provider for provider in providers if provider["name"] == provider_id]
+
+    payload = {
+        "ok": bool(providers),
+        "status": "catalog_available" if providers else "not_found",
+        "source": "builtin_provider_contract",
+        "provider_count": len(providers),
+        "healthy_provider_count": 0,
+        "execution_ready_provider_count": 0,
+        "providers": providers,
+    }
+    if provider_id and not providers:
+        payload["error"] = f"provider not found: {provider_id}"
+
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print("=" * 60)
+        print("ROSClaw Provider Readiness")
+        print("=" * 60)
+        if providers:
+            print(f"{'Name':<16} {'Type':<12} {'Status':<12} {'Capabilities'}")
+            print("-" * 60)
+            for provider in providers:
+                print(
+                    f"{provider['name']:<16} {provider['type']:<12} "
+                    f"{provider['status']:<12} {len(provider['capabilities'])}"
+                )
+            print("\nCatalog loaded: YES")
+            print("Provider health checked: NO")
+            print("Verified execution ready: NO")
+        else:
+            print(payload["error"])
+        print("=" * 60)
+    return 0 if providers else 1
+
+
+def cmd_provider_route(args: argparse.Namespace) -> int:
+    """Explain how a capability would route through the built-in provider catalog."""
+    capability = args.capability
+    providers = _builtin_provider_contracts()
+    candidates = [provider for provider in providers if capability in provider["capabilities"]]
+
+    if not candidates:
+        payload = {
+            "ok": False,
+            "capability": capability,
+            "selected_provider": None,
+            "fallbacks": [],
+            "reason": f"No built-in provider declares capability '{capability}'",
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"[ROSClaw] {payload['reason']}")
+        return 1
+
+    selected = candidates[0]
+    fallbacks = [provider["name"] for provider in candidates[1:3]]
+    payload = {
+        "ok": True,
+        "capability": capability,
+        "selected_provider": selected["name"],
+        "selected_type": selected["type"],
+        "fallbacks": fallbacks,
+        "reason": (
+            f"{selected['name']} declares capability '{capability}' in the built-in "
+            "provider contract"
+        ),
+        "score": 1.0,
+        "executable": selected["safety"]["executable"],
+        "requires_guard": selected["safety"]["requires_guard"],
+        "requires_human_gate": selected["safety"]["requires_human_gate"],
+        "dry_run_safe": True,
+        "candidates": [
+            {
+                "name": provider["name"],
+                "type": provider["type"],
+                "capabilities": provider["capabilities"],
+            }
+            for provider in candidates
+        ],
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print("=" * 60)
+        print("ROSClaw Provider Route")
+        print("=" * 60)
+        print(f"Capability: {capability}")
+        print(f"Selected:   {payload['selected_provider']}")
+        print(f"Reason:     {payload['reason']}")
+        print(f"Fallbacks:  {', '.join(fallbacks) if fallbacks else 'none'}")
+        print(f"Guard:      {'required' if payload['requires_guard'] else 'not required'}")
+        print("=" * 60)
+    return 0
+
+
+def cmd_provider_benchmark(args: argparse.Namespace) -> int:
+    """Produce a dry-run provider benchmark plan without invoking providers."""
+    if not args.dry_run:
+        message = "provider benchmark currently requires --dry-run to avoid external model calls"
+        if args.json:
+            print(json.dumps({"ok": False, "error": message}, indent=2, ensure_ascii=False))
+        else:
+            print(f"[ROSClaw] {message}")
+        return 1
+
+    capabilities = args.capability or [
+        "llm.chat",
+        "vlm.scene_graph",
+        "vla.plan",
+        "critic.risk",
+    ]
+    providers = _builtin_provider_contracts()
+    selected_names = set(args.provider or [])
+    if selected_names:
+        providers = [provider for provider in providers if provider["name"] in selected_names]
+
+    route_plan = []
+    for capability in capabilities:
+        candidates = [
+            provider["name"] for provider in providers if capability in provider["capabilities"]
+        ]
+        route_plan.append(
+            {
+                "capability": capability,
+                "selected_provider": candidates[0] if candidates else None,
+                "fallbacks": candidates[1:3],
+                "status": "planned" if candidates else "unroutable",
+            }
+        )
+
+    payload = {
+        "ok": True,
+        "status": "dry_run",
+        "dry_run": True,
+        "iterations": args.iterations,
+        "provider_count": len(providers),
+        "capabilities": capabilities,
+        "route_plan": route_plan,
+        "metrics": [
+            "route_success",
+            "latency_ms",
+            "normalized_result_schema",
+            "guard_required",
+        ],
+        "note": "No provider was invoked; this validates benchmark wiring and route coverage only.",
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print("=" * 60)
+        print("ROSClaw Provider Benchmark Plan")
+        print("=" * 60)
+        print(f"Status:     {payload['status']}")
+        print(f"Iterations: {payload['iterations']}")
+        for item in route_plan:
+            selected = item["selected_provider"] or "unroutable"
+            print(f"  {item['capability']:<24} -> {selected}")
+        print("=" * 60)
+    return 0
+
+
+def cmd_provider_list(_args: argparse.Namespace) -> int:
+    """List all registered providers."""
+    providers, _ = _auto_register_builtins()
+
+    print("=" * 60)
+    print("ROSClaw Provider Registry")
+    print("=" * 60)
+    if providers:
+        print(f"{'Name':<20} {'Type':<15} {'Status':<10} {'Description'}")
+        print("-" * 60)
+        for p in providers:
+            name = p.get("name", "N/A") if isinstance(p, dict) else getattr(p, "name", "N/A")
+            ptype = p.get("type", "N/A") if isinstance(p, dict) else getattr(p, "type", "N/A")
+            status = p.get("status", "N/A") if isinstance(p, dict) else "registered"
+            desc = (
+                p.get("description", "") if isinstance(p, dict) else getattr(p, "description", "")
+            )
+            print(f"{name:<20} {ptype:<15} {status:<10} {desc}")
+    else:
+        print("No providers registered.")
+        print("Builtin providers: llm, vlm, vla, vln, world, skill, critic, embedding")
+    print("=" * 60)
+    return 0
+
+
+def cmd_skill_list(_args: argparse.Namespace) -> int:
+    """List all available skills."""
+    _, skills = _auto_register_builtins()
+
+    print("=" * 60)
+    print("ROSClaw Skill Registry")
+    print("=" * 60)
+    if skills:
+        print(f"{'Skill ID':<20} {'Type':<15} {'Description'}")
+        print("-" * 60)
+        for s in skills:
+            name = getattr(s, "name", "N/A")
+            stype = getattr(s, "skill_type", "N/A")
+            desc = getattr(s, "description", "")
+            print(f"{name:<20} {stype:<15} {desc}")
+    else:
+        print("No skills registered.")
+        print("Builtin skills: pid_move, reach, grasp, navigate, inspect")
+    print("=" * 60)
+    return 0
+
+
+def cmd_sandbox_list_worlds(_args: argparse.Namespace) -> int:
+    """List available sandbox worlds."""
+    print("=" * 60)
+    print("ROSClaw Sandbox Worlds")
+    print("=" * 60)
+    worlds = [
+        {"name": "mock", "description": "Mock sandbox for testing (no physics)"},
+        {"name": "mujoco", "description": "MuJoCo physics simulation"},
+        {"name": "tabletop", "description": "Tabletop manipulation scene"},
+        {"name": "empty", "description": "Empty world for unit tests"},
+    ]
+    print(f"{'Name':<15} {'Description'}")
+    print("-" * 60)
+    for w in worlds:
+        print(f"{w['name']:<15} {w['description']}")
+    print("=" * 60)
+    return 0
+
+
+def cmd_sandbox_verify(args: argparse.Namespace) -> int:
+    """Run a deterministic sandbox physics verification case."""
+    from rosclaw.sandbox.verification import run_verification_case
+
+    try:
+        result = run_verification_case(
+            args.case,
+            robot_id=args.robot,
+            world_id=args.world,
+            steps=args.steps,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "case": args.case,
+                        "passed": False,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"[ROSClaw] Sandbox verification failed: {exc}", file=sys.stderr)
+        return 1
+
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        status = "PASS" if result.passed else "FAIL"
+        print("=" * 60)
+        print(f"Sandbox Verification — {result.case}")
+        print("=" * 60)
+        print(f"Status:      {status}")
+        print(f"Robot:       {result.robot_id}")
+        print(f"World:       {result.world_id}")
+        print(f"Has physics: {result.has_physics}")
+        print(f"Steps:       {result.steps}")
+        print(f"qpos/qvel:   {result.qpos_size}/{result.qvel_size}")
+        print(f"Final time:  {result.final_time:.6f}")
+        print(f"Reason:      {result.reason}")
+        print("=" * 60)
+    return 0 if result.passed else 1
+
+
+def cmd_sandbox_validate(args: argparse.Namespace) -> int:
+    """Validate a robot in sandbox."""
+    from rosclaw.runtime import RobotRegistry
+
+    robot_id = args.robot_id
+    print(f"[ROSClaw] Validating robot '{robot_id}' in sandbox...")
+    registry = RobotRegistry()
+    try:
+        result = registry.validate(robot_id)
+        if result["valid"]:
+            print(f"[ROSClaw] ✅ Sandbox validation passed for {robot_id}")
+            return 0
+        else:
+            print(f"[ROSClaw] ❌ Sandbox validation failed for {robot_id}")
+            for e in result.get("errors", []):
+                print(f"  🚫 {e}")
+            return 1
+    except Exception as exc:
+        print(f"[ROSClaw] ❌ Validation error: {exc}")
+        return 1
+
+
+def cmd_sandbox_generate_config(args: argparse.Namespace) -> int:
+    """Generate a simulation engine config from the active EffectiveBody."""
+    import yaml as _yaml
+
+    from rosclaw.body.resolver import BodyNotLinkedError, BodyResolver
+    from rosclaw.firstboot.workspace import resolve_home
+    from rosclaw.sandbox.body_adapter import SandboxBodyAdapter
+
+    workspace = resolve_home(args.workspace)
+    body_id = args.body if args.body and args.body != "current" else None
+    try:
+        resolver = BodyResolver(workspace=workspace, body_id=body_id)
+        if not resolver.is_linked():
+            print("[ROSClaw] No body linked. Run: rosclaw body link-eurdf <profile_id>")
+            return 1
+        body = resolver.get_effective_body()
+    except BodyNotLinkedError:
+        print("[ROSClaw] No body linked. Run: rosclaw body link-eurdf <profile_id>")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ROSClaw] Failed to load body: {exc}")
+        return 1
+
+    adapter = SandboxBodyAdapter.from_effective_body(body)
+    output_dir = (
+        Path(args.output_dir) if args.output_dir else resolver.body_dir / "refs" / "sandbox"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.engine == "mujoco":
+        config = adapter.to_mujoco_config()
+        output_path = output_dir / "mujoco.config.yaml"
+    else:
+        config = adapter.to_isaac_config()
+        output_path = output_dir / "isaac.config.yaml"
+
+    output_path.write_text(_yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "body_instance_id": body.body_instance_id,
+                    "effective_body_hash": body.effective_body_hash,
+                    "engine": args.engine,
+                    "output_path": str(output_path),
+                    "config": config,
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+
+    print(f"[ROSClaw] Generated {args.engine} config for {body.body_instance_id}")
+    print(f"  effective_body_hash: {body.effective_body_hash}")
+    print(f"  output: {output_path}")
+    return 0
+
+
+def cmd_memory_status(_args: argparse.Namespace) -> int:
+    """Show memory module status."""
+    from rosclaw.memory.interface import MemoryInterface
+
+    mem = MemoryInterface("cli")
+    mem._do_initialize()
+    stats = mem.get_statistics()
+    cap = mem.get_capacity_info()
+
+    print("=" * 60)
+    print("ROSClaw Memory Status")
+    print("=" * 60)
+    print(f"Total experiences:    {stats['total_experiences']}")
+    print(f"Success count:        {stats['success_count']}")
+    print(f"Failure count:        {stats['failure_count']}")
+    print(f"Success rate:         {stats['success_rate']:.1%}")
+    print(f"Capacity utilization: {cap['utilization']:.1%}")
+    print(f"Age span:             {cap['age_span_days']:.1f} days")
+    print("=" * 60)
+    return 0
+
+
+def _search_episode_artifacts(query: str, limit: int = 5) -> list[dict]:
+    """Search episode artifacts as a fallback when SeekDB is empty.
+
+    Bridges CLI memory queries to EpisodeRecorder artifact data so
+    that experiences recorded via Python API / Runtime are visible
+    from the command line.
+    """
+    from rosclaw.practice.episode_recorder import EpisodeRecorder
+
+    recorder = EpisodeRecorder(
+        "cli", event_bus=None, artifact_base_dir=str(_practice_artifacts_dir())
+    )
+    episodes = recorder.list_episodes()
+    if not episodes:
+        return []
+
+    query_lower = query.lower()
+    query_tokens = set(query_lower.split())
+    scored = []
+    for ep in episodes:
+        ep_id = ep.get("episode_id", "")
+        meta = recorder.get_episode(ep_id) or ep
+        pe = meta.get("praxis_event", {})
+        instruction = pe.get("agent_instruction", "")
+        text = " ".join(
+            [
+                instruction,
+                ep_id,
+                meta.get("status", ""),
+                meta.get("robot_id", ""),
+            ]
+        ).lower()
+        score = sum(1 for tok in query_tokens if tok in text)
+        if score > 0:
+            scored.append((score, meta))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = []
+    for _score, meta in scored[:limit]:
+        pe = meta.get("praxis_event", {})
+        results.append(
+            {
+                "id": meta.get("episode_id", "N/A"),
+                "event_type": meta.get("status", "episode"),
+                "instruction": pe.get("agent_instruction", ""),
+                "outcome": meta.get("status", "UNKNOWN"),
+                "tags": [meta.get("robot_id", "")],
+                "reward": meta.get("reward"),
+                "duration_sec": meta.get("duration_sec", 0),
+                "artifact": str(recorder.artifact_base / "episodes" / meta.get("episode_id", "")),
+            }
+        )
+    return results
+
+
+def cmd_memory_query(args: argparse.Namespace) -> int:
+    """Query memory for similar experiences."""
+    from rosclaw.memory.interface import MemoryInterface
+    from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+
+    db_path = _memory_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mem = MemoryInterface("cli", seekdb_client=SQLiteKnowledgeStore(str(db_path)))
+    mem._do_initialize()
+    results = mem.find_similar_experiences(args.query, limit=args.limit)
+
+    # Fallback: search episode artifacts only when --demo is requested.
+    if not results and getattr(args, "demo", False):
+        results = _search_episode_artifacts(args.query, limit=args.limit)
+
+    print("=" * 60)
+    print(f"Memory Query: '{args.query}'")
+    print("=" * 60)
+    if not results:
+        print("No matching experiences found.")
+        return 0
+
+    for i, r in enumerate(results, 1):
+        print(f"\n[{i}] {r.get('event_type', 'unknown').upper()}")
+        print(f"    ID:        {r.get('id', 'N/A')}")
+        print(f"    Instruction: {r.get('instruction', 'N/A')[:80]}")
+        print(f"    Outcome:   {r.get('outcome', 'N/A')}")
+        print(f"    Tags:      {', '.join(r.get('tags', []))}")
+        if r.get("reward") is not None:
+            print(f"    Reward:    {r['reward']:.2f}")
+        if r.get("artifact"):
+            print(f"    Artifact:  {r['artifact']}")
+    print("=" * 60)
+    return 0
+
+
+def _find_last_failure_from_artifacts(task_id: str | None = None) -> dict | None:
+    """Find the most recent failed episode from artifact data."""
+    from rosclaw.practice.episode_recorder import EpisodeRecorder
+
+    recorder = EpisodeRecorder(
+        "cli", event_bus=None, artifact_base_dir=str(_practice_artifacts_dir())
+    )
+    episodes = recorder.list_episodes()
+    if not episodes:
+        return None
+
+    # Sort by timestamp descending
+    episodes.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
+
+    for ep in episodes:
+        status = ep.get("status", "").lower()
+        if status in ("failed", "failure", "blocked"):
+            if task_id and task_id not in str(ep.get("episode_id", "")):
+                continue
+            meta = recorder.get_episode(ep.get("episode_id", "")) or ep
+            pe = meta.get("praxis_event", {})
+            return {
+                "id": ep.get("episode_id", "N/A"),
+                "failure_type": meta.get("status", "unknown"),
+                "root_cause": pe.get("agent_instruction", "unknown"),
+                "recovery_hint": "Review episode artifact for detailed error logs",
+                "sandbox_intervened": status == "blocked",
+                "timestamp": ep.get("timestamp", 0),
+            }
+    return None
+
+
+def cmd_memory_explain(args: argparse.Namespace) -> int:
+    """Explain the most recent failure."""
+    from rosclaw.memory.interface import MemoryInterface
+    from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+
+    db_path = _memory_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mem = MemoryInterface("cli", seekdb_client=SQLiteKnowledgeStore(str(db_path)))
+    mem._do_initialize()
+    failure = mem.explain_last_failure(task_id=args.task_id)
+
+    # Fallback: search episode artifacts for failures
+    if failure is None:
+        failure = _find_last_failure_from_artifacts(task_id=args.task_id)
+
+    print("=" * 60)
+    print("ROSClaw Memory — Last Failure Explanation")
+    print("=" * 60)
+    if failure is None:
+        print("No failure records found.")
+        return 0
+
+    print(f"Failure ID:    {failure.get('id', 'N/A')}")
+    print(f"Failure Type:  {failure.get('failure_type', 'N/A')}")
+    print(f"Root Cause:    {failure.get('root_cause', 'N/A')}")
+    print(f"Recovery Hint: {failure.get('recovery_hint', 'N/A')}")
+    print(f"Sandbox Intervention: {failure.get('sandbox_intervened', False)}")
+    print(f"Timestamp:     {failure.get('timestamp', 'N/A')}")
+    print("=" * 60)
+    return 0
+
+
+def cmd_memory_ingest(args: argparse.Namespace) -> int:
+    """Ingest a practice episode into memory."""
+    from rosclaw.memory.interface import MemoryInterface
+    from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+
+    episode_id = args.episode_id
+    data_root = str(resolve_practice_data_root(getattr(args, "data_root", None)))
+    db_path = _memory_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mem = MemoryInterface("cli", seekdb_client=SQLiteKnowledgeStore(str(db_path)))
+    mem._do_initialize()
+    result = mem.ingest_episode(episode_id, data_root=data_root)
+
+    if result.get("status") != "success":
+        print(f"[ROSClaw] Memory ingest failed: {result.get('reason')}", file=sys.stderr)
+        return 1
+
+    print("=" * 60)
+    print("ROSClaw Memory — Episode Ingested")
+    print("=" * 60)
+    print(f"Experience ID: {result.get('experience_id')}")
+    print(f"Episode:       {episode_id}")
+    print(f"Events:        {result.get('event_count')}")
+    print(f"Outcome:       {result.get('outcome')}")
+    print("=" * 60)
+    return 0
+
+
+# ------------------------------------------------------------------
+# Know subcommands
+# ------------------------------------------------------------------
+
+
+def cmd_know_search(args: argparse.Namespace) -> int:
+    """Search KNOW knowledge base for symptoms, patterns, or analogies."""
+    from rosclaw.know.interface import KnowledgeInterface
+
+    know = KnowledgeInterface(robot_id=args.robot_id or "rosclaw_default")
+    know._do_initialize()
+
+    query = args.query
+    print(f"[ROSClaw] KNOW search: '{query}'")
+
+    # 1. Symptom matching
+    match = know.match_symptom(query)
+    if match:
+        print("\n" + "=" * 60)
+        print("KNOW — Symptom Match")
+        print("=" * 60)
+        print(f"Pattern ID:   {match['pattern_id']}")
+        print(f"Domain:       {match['domain']}")
+        print(f"Symptom:      {match['symptom']}")
+        print(f"Fix:          {match['fix']}")
+        print(f"Anti-pattern: {match['anti_pattern']}")
+        print(f"Similarity:   {match['similarity']}")
+        print("=" * 60)
+        return 0
+
+    # 2. Task decomposition
+    task_hint = know.task_decomposition_hint(query)
+    if task_hint:
+        print("\n" + "=" * 60)
+        print("KNOW — Task Decomposition")
+        print("=" * 60)
+        print(f"Task:         {task_hint['task']}")
+        print(f"Pattern:      {task_hint['matched_pattern']}")
+        print(f"Confidence:   {task_hint['confidence']}")
+        print(f"Steps ({task_hint['step_count']}):")
+        for i, step in enumerate(task_hint["steps"], 1):
+            print(f"  {i}. {step}")
+        print("=" * 60)
+        return 0
+
+    # 3. Robot capability query
+    if args.robot_id:
+        caps = know.query_robot_capabilities(args.robot_id)
+        if caps:
+            print("\n" + "=" * 60)
+            print(f"KNOW — Robot Capabilities ({args.robot_id})")
+            print("=" * 60)
+            for cap in caps:
+                print(f"  • {cap}")
+            print("=" * 60)
+            return 0
+
+    print("\n[ROSClaw] No matching knowledge found.")
+    print("  Try: 'torque overflow', 'pick and place', 'velocity divergence'")
+    return 0
+
+
+def cmd_know_robot(args: argparse.Namespace) -> int:
+    """Show robot safety limits and simulation profile from KNOW."""
+    from rosclaw.know.interface import KnowledgeInterface
+
+    robot_id = args.robot_id
+    know = KnowledgeInterface(robot_id=robot_id)
+    know._do_initialize()
+
+    limits = know.get_robot_safety_limits(robot_id)
+    profile = know.get_robot_simulation_profile(robot_id)
+
+    print("=" * 60)
+    print(f"KNOW — Robot Profile: {robot_id}")
+    print("=" * 60)
+
+    if limits:
+        print("\nSafety Limits:")
+        for key, value in limits.items():
+            print(f"  {key}: {value}")
+    else:
+        print("\n  No safety limits configured.")
+
+    if profile:
+        print("\nSimulation Profile:")
+        for key, value in profile.items():
+            print(f"  {key}: {value}")
+    else:
+        print("\n  No simulation profile configured.")
+
+    # Task capability check
+    if args.task:
+        result = know.can_perform_task(robot_id, args.task)
+        if result:
+            print(f"\nTask: '{args.task}'")
+            print(f"  Can perform:     {'Yes' if result['can_perform'] else 'No'}")
+            print(f"  Matched caps:    {', '.join(result['matched_capabilities'])}")
+            if result["missing_capabilities"]:
+                print(f"  Missing caps:    {', '.join(result['missing_capabilities'])}")
+        else:
+            print(f"\nTask: '{args.task}' — unknown task pattern")
+
+    print("=" * 60)
+    return 0
+
+
+def cmd_know_recommend(args: argparse.Namespace) -> int:
+    """Recommend robots for a given task."""
+    from rosclaw.know.interface import KnowledgeInterface
+    from rosclaw.runtime import RobotRegistry
+
+    task = args.task
+    know = KnowledgeInterface()
+    know._do_initialize()
+
+    print(f"[ROSClaw] KNOW recommending robots for task: '{task}'")
+
+    # Seed capabilities from e-URDF zoo so recommendations work
+    registry = RobotRegistry()
+    available = registry.list_available()
+    for rid in available:
+        try:
+            caps = registry.inspect(rid)["capability"]["capabilities"]
+            know._capabilities[rid] = [c["name"] for c in caps]
+        except Exception:
+            pass
+
+    recs = know.recommend_robot_for_task(task)
+
+    if not recs:
+        print("\nNo robot recommendations found.")
+        return 0
+
+    print("\n" + "=" * 60)
+    print("KNOW — Robot Recommendations")
+    print("=" * 60)
+    print(f"{'Robot':<20} {'Score':<8} {'Matched':<30}")
+    print("-" * 60)
+    for rec in recs:
+        matched = ", ".join(rec["matched_capabilities"][:3])
+        print(f"{rec['robot_id']:<20} {rec['score']:<8.2f} {matched}")
+    print("=" * 60)
+    return 0
+
+
+def cmd_know_compile(args: argparse.Namespace) -> int:
+    """Compile a task card grounded in a practice episode."""
+    from rosclaw.know.interface import KnowledgeInterface
+
+    task = args.task
+    episode_id = args.episode_id
+    data_root = str(resolve_practice_data_root(getattr(args, "data_root", None)))
+
+    know = KnowledgeInterface(robot_id="rosclaw_default")
+    know._do_initialize()
+    card = know.compile_task_card(task, episode_id=episode_id, data_root=data_root)
+
+    if getattr(args, "json", False):
+        print(json.dumps(card, indent=2, default=str))
+        return 0
+
+    print("=" * 60)
+    print("ROSClaw KNOW — Grounded Task Card")
+    print("=" * 60)
+    print(f"Task:        {card['task']}")
+    print(f"Episode:     {card['episode_id']}")
+    print(f"Robot:       {card.get('robot_id') or 'N/A'}")
+    print(f"Outcome:     {card.get('outcome') or 'N/A'}")
+    print(f"Event count: {card['evidence']['event_count']}")
+    print(f"Sources:     {', '.join(card['evidence']['sources'])}")
+    if card["capabilities"]:
+        print(f"Capabilities: {', '.join(card['capabilities'])}")
+    if card["steps"]:
+        print("Steps:")
+        for i, step in enumerate(card["steps"], 1):
+            print(f"  {i}. {step}")
+    print("=" * 60)
+    return 0
+
+
+# ------------------------------------------------------------------
+# Demo subcommands
+# ------------------------------------------------------------------
+
+
+def cmd_demo_mobile_pid(args: argparse.Namespace) -> int:
+    """Run a mobile base PID control demo."""
+    print("=" * 60)
+    print("ROSClaw Demo — Mobile Base PID Control")
+    print("=" * 60)
+
+    robot_id = args.robot_id
+    target = args.target
+    kp = args.kp
+    ki = args.ki
+    kd = args.kd
+    backend = getattr(args, "backend", "mock")
+
+    print(f"\nRobot:   {robot_id}")
+    print(f"Backend: {backend}")
+    print(f"Target:  x = {target}m")
+    print(f"PID:     Kp={kp}, Ki={ki}, Kd={kd}")
+
+    try:
+        from rosclaw.control.pid_controller import PIDController, PIDGains
+        from rosclaw.core import Runtime, RuntimeConfig
+
+        # Attempt ROS2 backend if requested
+        if backend == "ros2":
+            try:
+                import rclpy
+
+                from rosclaw.mcp_drivers.ros2_driver import ROS2Driver
+
+                print("[ROSClaw] Initializing ROS2 backend...")
+                rclpy.init()
+                driver = ROS2Driver(robot_id=robot_id)
+                driver.initialize()
+                print("[ROSClaw] ROS2 backend initialized. Publishing velocity commands...")
+                # Run PID through ROS2 twist publisher
+                pid = PIDController(PIDGains(kp=kp, ki=ki, kd=kd))
+                pid.set_output_limit(-3.0, 3.0)
+                position = 0.0
+                dt = 0.05
+                for _step in range(100):
+                    error = target - position
+                    control = pid.update(error, dt)
+                    position += control * dt
+                    driver.publish_velocity(linear_x=control, angular_z=0.0)
+                    if abs(error) < 0.05:
+                        break
+                driver.shutdown()
+                rclpy.shutdown()
+                final_error = abs(target - position)
+                status = "success" if final_error < 0.05 else "timeout"
+                print("\nResult:")
+                print(f"  Steps:       {_step + 1}")
+                print(f"  Final error: {final_error:.4f}m")
+                print(f"  Status:      {status} (ROS2 backend)")
+                print("=" * 60)
+                return 0 if status == "success" else 1
+            except ImportError:
+                print(
+                    "[ROSClaw] ROS2 not available (rclpy not installed). Falling back to mock backend."
+                )
+                backend = "mock"
+
+        config = RuntimeConfig(
+            robot_id=robot_id,
+            enable_firewall=True,
+            enable_memory=True,
+            enable_practice=True,
+            enable_how=True,
+        )
+        runtime = Runtime(config)
+        runtime.initialize()
+        runtime.start()
+
+        pid = PIDController(PIDGains(kp=kp, ki=ki, kd=kd))
+        pid.set_output_limit(-3.0, 3.0)
+
+        # Simulate control loop with realistic mass-spring-damper physics
+        # mass=0.1kg, physical_damping=0.3 N·s/m
+        # High Kp + low Kd → underdamped oscillation (ζ < 1)
+        # Normal Kp=2,Kd=0.5 → overdamped (ζ > 1), converges quickly
+        mass = 0.1
+        physical_damping = 0.3
+        position = 0.0
+        velocity = 0.0
+        dt = 0.05
+        max_steps = 200
+        position_history = []
+        status = "timeout"
+
+        for step in range(max_steps):
+            error = target - position
+            control = pid.update(error, dt)
+
+            # Realistic physics: F = ma, force = control - damping * velocity
+            force = control - physical_damping * velocity
+            acceleration = force / mass
+            velocity += acceleration * dt
+            position += velocity * dt
+
+            position_history.append(position)
+
+            # Oscillation detection: if position swings back and forth with large amplitude
+            if len(position_history) >= 40:
+                recent = position_history[-40:]
+                swing = max(recent) - min(recent)
+                if swing > 0.8:
+                    status = "oscillation"
+                    print(f"\n  ⚠️  OSCILLATION DETECTED at step {step + 1}")
+                    print(f"     Position swing: {swing:.3f}m (threshold: 0.8m)")
+                    print(f"     Kp={kp} is too high / Kd={kd} is too low for this plant")
+                    break
+
+            # Convergence: close to target AND nearly stopped
+            if abs(error) < 0.05 and abs(velocity) < 0.02:
+                status = "success"
+                break
+
+        final_error = abs(target - position)
+        if status == "timeout" and final_error < 0.05:
+            status = "success"
+
+        runtime.stop()
+
+        print("\nResult:")
+        print(f"  Steps:       {step + 1}")
+        print(f"  Final error: {final_error:.4f}m")
+        print(f"  Status:      {status}")
+        if backend == "mock":
+            print("  Note:        Using mock backend. For ROS2, use --backend ros2")
+        print("=" * 60)
+        return 0 if status == "success" else 1
+
+    except Exception as exc:
+        print(f"\n[ROSClaw] Demo failed: {exc}")
+        return 1
+
+
+def cmd_demo_tabletop_grasp(args: argparse.Namespace) -> int:
+    """Run a tabletop grasp demo."""
+    print("=" * 60)
+    print("ROSClaw Demo — Tabletop Grasp")
+    print("=" * 60)
+
+    robot_id = args.robot_id
+    object_id = args.object
+
+    print(f"\nRobot:  {robot_id}")
+    print(f"Object: {object_id}")
+
+    try:
+        from rosclaw.core import Runtime, RuntimeConfig
+
+        config = RuntimeConfig(
+            robot_id=robot_id,
+            enable_firewall=True,
+            enable_memory=True,
+            enable_practice=True,
+            enable_how=True,
+        )
+        runtime = Runtime(config)
+        runtime.initialize()
+        runtime.start()
+
+        # Simulate grasp pipeline
+        print("\n  1. VLM locates object...")
+        print("  2. Grasp skill generates plan...")
+        print("  3. Sandbox validates trajectory...")
+        print("  4. Runtime executes grasp...")
+        print("  5. Critic judges success...")
+
+        runtime.stop()
+
+        print("\nResult:")
+        print("  Status: success (simulated)")
+        print("=" * 60)
+        return 0
+
+    except Exception as exc:
+        print(f"\n[ROSClaw] Demo failed: {exc}")
+        return 1
+
+
+def cmd_demo_list(args: argparse.Namespace) -> int:
+    """List official evidence-bearing product demos."""
+    from rosclaw.product.cli import cmd_demo_list as product_handler
+
+    return product_handler(args)
+
+
+def cmd_demo_run(args: argparse.Namespace) -> int:
+    """Run an official demo and print its evidence-bearing receipt."""
+    from rosclaw.product.cli import cmd_demo_run as product_handler
+
+    return product_handler(args)
+
+
+def cmd_explain_run(args: argparse.Namespace) -> int:
+    """Explain a persisted product run."""
+    from rosclaw.product.cli import cmd_explain_run as product_handler
+
+    return product_handler(args)
+
+
+# Shared event history file for cross-CLI-process persistence
+_EVENT_HISTORY_FILE = get_rosclaw_home() / "event_history.jsonl"
+_EVENT_HISTORY_MAX = 10000
+
+
+def _append_event_history(event) -> None:
+    """Append an event to the persistent JSONL history file."""
+    _EVENT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": getattr(event, "timestamp", time.time()),
+        "topic": getattr(event, "topic", ""),
+        "source": getattr(event, "source", ""),
+        "payload": getattr(event, "payload", {}),
+        "event_id": getattr(event, "event_id", ""),
+        "trace_id": getattr(event, "trace_id", ""),
+    }
+    with open(_EVENT_HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+    # Trim if too large
+    try:
+        lines = _EVENT_HISTORY_FILE.read_text(encoding="utf-8").strip().split("\n")
+        if len(lines) > _EVENT_HISTORY_MAX:
+            trimmed = lines[-_EVENT_HISTORY_MAX:]
+            _EVENT_HISTORY_FILE.write_text("\n".join(trimmed) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_event_history(limit: int = 100) -> list:
+    """Load events from the persistent JSONL history file."""
+    if not _EVENT_HISTORY_FILE.exists():
+        return []
+    try:
+        with open(_EVENT_HISTORY_FILE, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        events = []
+        for line in lines[-limit:]:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+    except Exception:
+        return []
+
+
+def cmd_events_tail(args: argparse.Namespace) -> int:
+    """Tail EventBus events."""
+    from rosclaw.core.event_bus import get_global_event_bus
+
+    # Combine in-memory + persistent history
+    bus = get_global_event_bus()
+    history = bus.get_history(limit=args.tail)
+    if not history:
+        # Fallback: load from persistent file (cross-process)
+        file_events = _load_event_history(limit=args.tail)
+        if file_events:
+            print("=" * 70)
+            print(f"ROSClaw EventBus — Last {args.tail} events")
+            print("=" * 70)
+            for ev in file_events:
+                ts = ev.get("timestamp", "?")
+                topic = ev.get("topic", "?")
+                src = ev.get("source", "?")
+                print(f"[{ts}] {topic:<40} src={src}")
+            print("=" * 70)
+            return 0
+        print("=" * 70)
+        print(f"ROSClaw EventBus — Last {args.tail} events")
+        print("=" * 70)
+        print("No events in bus history.")
+        return 0
+
+    print("=" * 70)
+    print(f"ROSClaw EventBus — Last {args.tail} events")
+    print("=" * 70)
+    for ev in history:
+        ts = getattr(ev, "timestamp", "?")
+        topic = getattr(ev, "topic", "?")
+        src = getattr(ev, "source", "?")
+        print(f"[{ts}] {topic:<40} src={src}")
+    print("=" * 70)
+    return 0
+
+
+def cmd_events_publish(args: argparse.Namespace) -> int:
+    """Publish an event to EventBus."""
+    from rosclaw.core.event_bus import Event, get_global_event_bus
+
+    bus = get_global_event_bus()
+    try:
+        payload = json.loads(args.payload) if args.payload else {}
+    except json.JSONDecodeError:
+        print(f"[ROSClaw] ❌ Invalid JSON payload: {args.payload}")
+        return 1
+
+    event = Event(
+        topic=args.topic,
+        payload=payload,
+        source=args.source or "cli",
+        metadata={"trace_id": args.trace_id} if args.trace_id else {},
+    )
+    bus.publish(event)
+    # Persist to file for cross-process visibility
+    _append_event_history(event)
+    print(f"[ROSClaw] ✅ Published event to '{args.topic}'")
+    return 0
+
+
+def cmd_events_list(args: argparse.Namespace) -> int:
+    """List published events in EventBus history."""
+    from rosclaw.core.event_bus import get_global_event_bus
+
+    bus = get_global_event_bus()
+    history = bus.get_history(limit=args.limit)
+    if not history:
+        # Fallback: load from persistent file (cross-process)
+        file_events = _load_event_history(limit=args.limit)
+        if file_events:
+            print("=" * 70)
+            print("ROSClaw EventBus — Published Events")
+            print("=" * 70)
+            for i, ev in enumerate(file_events, 1):
+                ts = ev.get("timestamp", "?")
+                topic = ev.get("topic", "?")
+                src = ev.get("source", "?")
+                payload = ev.get("payload", {})
+                payload_preview = json.dumps(payload, default=str)[:50] if payload else "{}"
+                print(f"  [{i}] [{ts}] {topic:<35} src={src:<15} {payload_preview}")
+            print(f"\nTotal: {len(file_events)} event(s)")
+            print("=" * 70)
+            return 0
+        print("=" * 70)
+        print("ROSClaw EventBus — Published Events")
+        print("=" * 70)
+        print("No events in bus history.")
+        return 0
+
+    print("=" * 70)
+    print("ROSClaw EventBus — Published Events")
+    print("=" * 70)
+    for i, ev in enumerate(history, 1):
+        ts = getattr(ev, "timestamp", "?")
+        topic = getattr(ev, "topic", "?")
+        src = getattr(ev, "source", "?")
+        payload = getattr(ev, "payload", {})
+        payload_preview = json.dumps(payload, default=str)[:50] if payload else "{}"
+        print(f"  [{i}] [{ts}] {topic:<35} src={src:<15} {payload_preview}")
+    print(f"\nTotal: {len(history)} event(s)")
+    print("=" * 70)
+    return 0
+
+
+def cmd_firewall_check(args: argparse.Namespace) -> int:
+    """Check action safety via firewall."""
+    from rosclaw.runtime import RobotRegistry
+
+    world = args.world or "empty"
+    print(f"[ROSClaw] Firewall check: robot={args.robot}, world={world}, action={args.action}")
+    registry = RobotRegistry()
+    profile = registry.get(args.robot)
+    if profile is None:
+        print(f"[ROSClaw] ❌ Robot '{args.robot}' not found")
+        return 1
+
+    try:
+        action_data = (
+            json.loads(args.action) if args.action.startswith("{") else {"type": args.action}
+        )
+    except json.JSONDecodeError:
+        action_data = {"type": args.action}
+
+    # Simple safety checks based on e-URDF profile
+    decision = "ALLOW"
+    risk_score = 0.0
+    reason = None
+    violations = []
+
+    # Check workspace boundaries
+    wb = profile.safety.workspace_boundaries
+    if wb and action_data.get("target"):
+        target = action_data["target"]
+        x_range = wb.get("x", [-float("inf"), float("inf")])
+        y_range = wb.get("y", [-float("inf"), float("inf")])
+        z_range = wb.get("z", [-float("inf"), float("inf")])
+        if len(target) >= 3:
+            if not (x_range[0] <= target[0] <= x_range[1]):
+                decision = "BLOCK"
+                risk_score = 0.85
+                reason = (
+                    f"workspace_boundary_x ({target[0]:.2f} not in [{x_range[0]}, {x_range[1]}])"
+                )
+                violations.append("workspace_boundary")
+            elif not (y_range[0] <= target[1] <= y_range[1]):
+                decision = "BLOCK"
+                risk_score = 0.85
+                reason = (
+                    f"workspace_boundary_y ({target[1]:.2f} not in [{y_range[0]}, {y_range[1]}])"
+                )
+                violations.append("workspace_boundary")
+            elif not (z_range[0] <= target[2] <= z_range[1]):
+                decision = "BLOCK"
+                risk_score = 0.85
+                reason = (
+                    f"workspace_boundary_z ({target[2]:.2f} not in [{z_range[0]}, {z_range[1]}])"
+                )
+                violations.append("workspace_boundary")
+
+    # Check safety level override
+    if profile.safety.safety_level == "STRICT":
+        risk_score = min(risk_score + 0.1, 1.0)
+
+    print("=" * 60)
+    print("Firewall Decision")
+    print("=" * 60)
+    print(f"Robot:      {args.robot}")
+    print(f"Safety:     {profile.safety.safety_level}")
+    print(f"Decision:   {decision}")
+    print(f"Risk Score: {risk_score:.2f}")
+    if reason:
+        print(f"Reason:     {reason}")
+    if violations:
+        print(f"Violations: {', '.join(violations)}")
+    print("=" * 60)
+    return 0 if decision == "ALLOW" else 1
+
+
+def cmd_sandbox_run(args: argparse.Namespace) -> int:
+    """Run a truthful sandbox episode through Runtime.submit_action()."""
+    from rosclaw.kernel import ActionState, ExecutionMode
+    from rosclaw.sandbox.service import (
+        SandboxConfigurationError,
+        SandboxRunRequest,
+        run_sandbox_action,
+    )
+
+    mode = ExecutionMode(str(args.mode).upper())
+    backend = str(args.backend or "mujoco").lower()
+    world = args.world or "empty"
+    display_backend = "fixture" if mode is ExecutionMode.FIXTURE else backend
+
+    if not args.json:
+        print(
+            f"[ROSClaw] Running sandbox episode: robot={args.robot}, "
+            f"world={world}, task={args.task}, mode={mode.value}"
+        )
+
+    artifact_root = Path(args.artifact_dir).expanduser() if args.artifact_dir else None
+    target: tuple[float, float, float] | None = None
+    if args.target is not None:
+        target = (float(args.target[0]), float(args.target[1]), float(args.target[2]))
+    try:
+        receipt = run_sandbox_action(
+            SandboxRunRequest(
+                robot=args.robot,
+                world=world,
+                task=args.task,
+                mode=mode,
+                backend=backend,
+                target=target,
+                max_steps=args.steps,
+                tolerance_m=args.tolerance,
+                seed=args.seed,
+                artifact_root=artifact_root,
+                trace_id=args.trace_id,
+            )
+        )
+        result = receipt.to_dict()
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return (
+                0
+                if (
+                    receipt.final_state in {ActionState.COMPLETED, ActionState.DEGRADED}
+                    and (receipt.verified or mode is ExecutionMode.FIXTURE)
+                )
+                else 1
+            )
+
+        print("=" * 60)
+        print("Sandbox Episode Result")
+        print("=" * 60)
+        if mode is ExecutionMode.FIXTURE:
+            print("MODE: FIXTURE")
+            print("NO PHYSICS WAS EXECUTED")
+            print("NOT VALID FOR ACCEPTANCE")
+        print(f"Action ID:  {result['action_id']}")
+        print(f"Trace ID:   {result['trace_id']}")
+        print(f"Status:     {result['final_state']}")
+        print(f"Evidence:   {result['evidence_level']}")
+        print(f"Verified:   {result['verified']}")
+        print(f"World:      {world}")
+        print(f"Backend:    {display_backend}")
+        simulation = result.get("simulation_result") or {}
+        verification = result.get("verification_result") or {}
+        print(f"Steps:      {simulation.get('steps', 0)}")
+        if verification.get("final_error_m") is not None:
+            print(f"Final Error:{verification['final_error_m']:.6f}m")
+        for artifact in result.get("artifacts", []):
+            print(f"Artifact:   {artifact}")
+        for error in result.get("errors", []):
+            print(f"Error:      {error.get('code')}: {error.get('message')}")
+        print("=" * 60)
+        return (
+            0
+            if (
+                receipt.final_state in {ActionState.COMPLETED, ActionState.DEGRADED}
+                and (receipt.verified or mode is ExecutionMode.FIXTURE)
+            )
+            else 1
+        )
+    except SandboxConfigurationError as exc:
+        if args.json:
+            print(json.dumps({"status": "BLOCKED", "error": str(exc)}, indent=2))
+        else:
+            print(f"[ROSClaw] {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "status": "FAILED",
+                        "execution_mode": mode.value,
+                        "verified": False,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"[ROSClaw] Sandbox run error: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_sandbox_replay(args: argparse.Namespace) -> int:
+    """Replay a sandbox episode."""
+    receipt_arg = getattr(args, "receipt", None)
+    if receipt_arg:
+        receipt_path = Path(receipt_arg).expanduser().resolve()
+        try:
+            if not receipt_path.is_file():
+                print(f"[ROSClaw] Receipt not found: {receipt_path}", file=sys.stderr)
+                return 2
+            if receipt_path.stat().st_size > 16 * 1024 * 1024:
+                print("[ROSClaw] Replay receipt exceeds the 16 MiB limit.", file=sys.stderr)
+                return 2
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if not isinstance(receipt, dict):
+                raise ValueError("receipt root must be a JSON object")
+            request = receipt.get("request")
+            scenario = request.get("scenario") if isinstance(request, dict) else None
+            if not isinstance(scenario, dict):
+                raise ValueError("receipt scenario is missing")
+            robot_id = str(getattr(args, "robot", None) or scenario["robot_id"])
+            world_id = str(getattr(args, "world", None) or scenario["world_id"])
+            from rosclaw.sandbox.backends import MujocoCpuBackend
+            from rosclaw.sandbox.sandbox_api import Sandbox
+
+            sandbox = Sandbox.create(robot_id, world_id, "mujoco")
+            try:
+                report = MujocoCpuBackend(sandbox).replay(receipt, strict=True)
+            finally:
+                sandbox.close()
+        except (KeyError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            print(f"[ROSClaw] Invalid replay receipt: {exc}", file=sys.stderr)
+            return 2
+        rendered = report.to_dict()
+        if getattr(args, "json", False):
+            print(json.dumps(rendered, indent=2, sort_keys=True))
+        else:
+            print(f"[ROSClaw] {report.reason}")
+            print(f"  environment_match: {report.environment_match}")
+            print(f"  hashes_verified:   {report.hashes_verified}")
+            print(f"  deterministic:     {report.deterministic_label}")
+            if report.mismatches:
+                print(f"  mismatches:        {', '.join(report.mismatches)}")
+        return 0 if report.verified else 2
+
+    if not getattr(args, "episode_id", None):
+        print("[ROSClaw] Provide an episode_id or --receipt.", file=sys.stderr)
+        return 2
+    print(f"[ROSClaw] Replaying sandbox episode: {args.episode_id}")
+    artifact_root = Path("./practice_data").resolve()
+    artifact_dir = (artifact_root / str(args.episode_id)).resolve()
+    if not artifact_dir.is_relative_to(artifact_root):
+        print("[ROSClaw] Invalid legacy episode identifier.", file=sys.stderr)
+        return 2
+    if not artifact_dir.is_dir():
+        print(f"[ROSClaw] ⚠️  Episode artifacts not found: {artifact_dir}")
+        return 1
+
+    print("=" * 60)
+    print(f"Sandbox Replay — {args.episode_id}")
+    print("=" * 60)
+    for f in sorted(artifact_dir.glob("*")):
+        print(f"  📄 {f.name}")
+    metadata_file = artifact_dir / "metadata.json"
+    if metadata_file.is_file() and metadata_file.stat().st_size <= 1024 * 1024:
+        try:
+            data = json.loads(metadata_file.read_text())
+            print(f"\n  Status:     {data.get('status', 'N/A')}")
+            print(f"  Robot:      {data.get('robot_id', 'N/A')}")
+            print(f"  Task:       {data.get('task', 'N/A')}")
+            print(f"  Duration:   {data.get('duration_sec', 0):.2f}s")
+        except json.JSONDecodeError:
+            pass
+    print("=" * 60)
+    return 0
+
+
+def _evaluate_sandbox_policy(robot: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Return a sandbox decision dict for ``robot`` and parsed ``action``."""
+    from rosclaw.body.service import _resolve_profile_alias
+    from rosclaw.runtime import RobotRegistry
+
+    robot = _resolve_profile_alias(robot)
+    registry = RobotRegistry()
+    profile = registry.get(robot)
+    if profile is None:
+        return {
+            "decision": "BLOCK",
+            "reason": f"Robot '{robot}' not found",
+            "robot": robot,
+            "safety_level": "UNKNOWN",
+            "evidence": {"profile_missing": True},
+        }
+
+    action_type = action.get("type", "")
+
+    # Determine perception-only status.
+    safety = getattr(profile, "safety", None) or {}
+    if hasattr(safety, "environment"):
+        env = safety.environment or {}
+    elif isinstance(safety, dict):
+        env = safety.get("environment", {})
+    else:
+        env = {}
+
+    perception_only = bool(env.get("perception_only") or env.get("no_actuation"))
+    safety_level = getattr(safety, "safety_level", None) or safety.get("safety_level", "MODERATE")
+
+    blocked_action_types = {
+        "move_base",
+        "cmd_vel",
+        "joint_trajectory",
+        "gripper_command",
+        "actuator_write",
+        "servo",
+        "set_joint_position",
+        "set_joint_velocity",
+        "set_joint_effort",
+    }
+
+    allowed_sensor_types = {
+        "capture_rgb",
+        "capture_depth",
+        "capture_rgbd",
+        "capture_pointcloud",
+        "capture_aligned_rgbd",
+        "rgb_stream",
+        "depth_stream",
+        "aligned_rgbd",
+        "pointcloud",
+        "imu_read",
+        "query_camera_info",
+        "list_devices",
+        "provider_reasoning",
+    }
+
+    def _topic_or_service_blocked() -> tuple[bool, str | None]:
+        topic = action.get("topic", "")
+        service = action.get("service", "")
+        name = action.get("name", "")
+        for t in (topic, service, name):
+            if not t:
+                continue
+            low = str(t).lower()
+            if "/cmd_vel" in low or low.endswith("/cmd_vel"):
+                return True, f"blocked actuator topic/service: {t}"
+            if "controller_manager/switch_controller" in low:
+                return True, f"blocked actuator service: {t}"
+            if "gripper" in low and "state" not in low:
+                return True, f"blocked gripper command: {t}"
+        return False, None
+
+    if perception_only:
+        # Sensor actions are explicitly allowed.
+        if action_type in allowed_sensor_types:
+            return {
+                "decision": "ALLOW",
+                "reason": "Perception-only body: sensor capture action permitted.",
+                "body_id": robot,
+                "robot": robot,
+                "safety_level": safety_level,
+                "evidence": {"perception_only": True, "action_type": action_type},
+            }
+
+        # Actuator actions are blocked.
+        if action_type in blocked_action_types:
+            return {
+                "decision": "BLOCK",
+                "reason": f"Perception-only body: actuator action '{action_type}' is forbidden.",
+                "body_id": robot,
+                "robot": robot,
+                "safety_level": safety_level,
+                "evidence": {
+                    "perception_only": True,
+                    "no_actuation": bool(env.get("no_actuation")),
+                    "action_type": action_type,
+                },
+            }
+
+        # Check topic/service semantics for pub/service actions.
+        if action_type in ("ros_topic_pub", "ros_topic_publish", "ros_service_call"):
+            blocked, reason = _topic_or_service_blocked()
+            if blocked:
+                return {
+                    "decision": "BLOCK",
+                    "reason": f"Perception-only body: {reason}",
+                    "body_id": robot,
+                    "robot": robot,
+                    "safety_level": safety_level,
+                    "evidence": {
+                        "perception_only": True,
+                        "action_type": action_type,
+                        "action": action,
+                    },
+                }
+            # Read-only topic/service could be allowed; fall through to workspace check.
+
+    # Fallback: workspace-boundary check for non-perception-only or unclassified actions.
+    target = action.get("target", [0, 0, 0])
+    if not isinstance(target, list) or len(target) < 3:
+        target = [0, 0, 0]
+
+    if hasattr(safety, "workspace_boundaries"):
+        wb = safety.workspace_boundaries
+    elif isinstance(safety, dict):
+        wb = safety.get("workspace_boundaries", {})
+    else:
+        wb = {}
+
+    if wb.get("type") == "bounding_box":
+        center = wb.get("center", [0, 0, 0])
+        dims = wb.get("dimensions", [0, 0, 0])
+        x_range = [center[0] - dims[0] / 2, center[0] + dims[0] / 2]
+        y_range = [center[1] - dims[1] / 2, center[1] + dims[1] / 2]
+        z_range = [center[2] - dims[2] / 2, center[2] + dims[2] / 2]
+    else:
+        x_range = wb.get("x", [-10, 10])
+        y_range = wb.get("y", [-10, 10])
+        z_range = wb.get("z", [-10, 10])
+
+    violated = []
+    if target[0] < x_range[0] or target[0] > x_range[1]:
+        violated.append(
+            f"workspace_boundary_x ({target[0]:.2f} not in [{x_range[0]:.2f}, {x_range[1]:.2f}])"
+        )
+    if target[1] < y_range[0] or target[1] > y_range[1]:
+        violated.append(
+            f"workspace_boundary_y ({target[1]:.2f} not in [{y_range[0]:.2f}, {y_range[1]:.2f}])"
+        )
+    if target[2] < z_range[0] or target[2] > z_range[1]:
+        violated.append(
+            f"workspace_boundary_z ({target[2]:.2f} not in [{z_range[0]:.2f}, {z_range[1]:.2f}])"
+        )
+
+    if violated:
+        return {
+            "decision": "BLOCK",
+            "reason": ", ".join(violated),
+            "body_id": robot,
+            "robot": robot,
+            "safety_level": safety_level,
+            "evidence": {"workspace_violations": violated},
+        }
+    return {
+        "decision": "ALLOW",
+        "reason": "within workspace boundaries",
+        "body_id": robot,
+        "robot": robot,
+        "safety_level": safety_level,
+        "evidence": {"workspace_checked": True},
+    }
+
+
+def cmd_sandbox_check(args: argparse.Namespace) -> int:
+    """Check action safety via sandbox firewall.
+
+    Perception-only bodies (e.g. RealSense cameras) block actuator commands
+    and allow sensor-capture actions without requiring a workspace boundary
+    simulation. Non-perception-only bodies fall back to the existing workspace
+    boundary check.
+    """
+    # Parse action
+    try:
+        action = json.loads(args.action) if args.action.startswith("{") else {"type": args.action}
+    except json.JSONDecodeError:
+        result = {
+            "decision": "BLOCK",
+            "reason": f"Invalid action JSON: {args.action}",
+            "robot": args.robot,
+            "safety_level": "UNKNOWN",
+            "evidence": {"parse_error": True},
+        }
+        return _print_sandbox_result(args, result)
+
+    result = _evaluate_sandbox_policy(args.robot, action)
+    return _print_sandbox_result(args, result)
+
+
+def _print_sandbox_result(args: argparse.Namespace, result: dict[str, Any]) -> int:
+    """Print sandbox check result as JSON or human-readable text."""
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str, ensure_ascii=False))
+    else:
+        print("=" * 60)
+        print("Sandbox Safety Check")
+        print("=" * 60)
+        print(f"Robot:      {result.get('robot')}")
+        print(f"Body ID:    {result.get('body_id', 'N/A')}")
+        print(f"Decision:   {result['decision']}")
+        print(f"Risk Score: {0.85 if result['decision'] == 'BLOCK' else 0.0:.2f}")
+        print(f"Reason:     {result['reason']}")
+        print(f"Safety Level: {result.get('safety_level', 'UNKNOWN')}")
+        print(f"Evidence:   {result.get('evidence', {})}")
+        print("=" * 60)
+    return 1 if result["decision"] == "BLOCK" else 0
+
+
+def _collect_realsense_checks(
+    args: argparse.Namespace,
+) -> tuple[list[tuple[str, str, bool]], list[str], list[str]]:
+    """Collect RealSense D405 health checks without formatting output."""
+    import importlib
+    import shutil
+    import subprocess
+
+    from rosclaw.mcp.onboarding.installed import InstalledRegistry
+    from rosclaw.runtime import RobotRegistry
+
+    checks: list[tuple[str, str, bool]] = []
+    warnings: list[str] = []
+    issues: list[str] = []
+
+    # 1. rs-enumerate-devices
+    rs_enum = shutil.which("rs-enumerate-devices")
+    if rs_enum:
+        try:
+            proc = subprocess.run(
+                [rs_enum, "--compact"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            enum_ok = proc.returncode == 0
+            summary = "found" if enum_ok else "no devices"
+            if enum_ok:
+                # Detect USB mode from output
+                if "USB2" in proc.stdout or "Usb2" in proc.stdout:
+                    warnings.append("RealSense running on USB2 (degraded bandwidth). Use USB3.")
+                if "USB3" in proc.stdout or "Usb3" in proc.stdout:
+                    summary = "USB3 device found"
+        except Exception as exc:
+            enum_ok = False
+            summary = f"error: {exc}"
+    else:
+        enum_ok = False
+        summary = "not installed"
+        issues.append("rs-enumerate-devices not found; install librealsense2-utils")
+    checks.append(("rs-enumerate-devices", summary, enum_ok))
+
+    # 2. pyrealsense2
+    try:
+        import pyrealsense2 as rs
+
+        checks.append(("pyrealsense2", getattr(rs, "__version__", "installed"), True))
+    except ImportError:
+        checks.append(("pyrealsense2", "not installed", True))
+        warnings.append("pyrealsense2 not installed; bench will fall back to rs-data-collect")
+
+    # 3. ROS2 checks
+    ros2_cli = shutil.which("ros2")
+    checks.append(("ros2 CLI", "found" if ros2_cli else "not found", ros2_cli is not None))
+    if not ros2_cli:
+        warnings.append("ros2 CLI not found; ROS2 RealSense checks skipped")
+
+    try:
+        importlib.import_module("rclpy")
+        checks.append(("rclpy", "OK", True))
+    except Exception as exc:
+        checks.append(("rclpy", f"FAIL: {exc}", False))
+        warnings.append("rclpy not importable")
+
+    if ros2_cli:
+        try:
+            proc = subprocess.run(
+                ["ros2", "pkg", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            pkg_list = proc.stdout if proc.returncode == 0 else ""
+            has_realsense2_camera = "realsense2_camera" in pkg_list
+            checks.append(
+                (
+                    "realsense2_camera package",
+                    "found" if has_realsense2_camera else "not found",
+                    has_realsense2_camera,
+                )
+            )
+            if not has_realsense2_camera:
+                warnings.append("realsense2_camera ROS2 package not found")
+        except Exception as exc:
+            checks.append(("realsense2_camera package", f"error: {exc}", False))
+
+    # 4. Installed RealSense MCPs
+    installed_ok: list[str] = []
+    try:
+        registry = InstalledRegistry()
+        records = registry.list()
+        for name in ("librealsense-mcp", "realsense-ros-mcp"):
+            rec = next((r for r in records if r.name == name), None)
+            if rec:
+                installed_ok.append(f"{name} ({rec.status})")
+            else:
+                issues.append(f"{name} not installed; run `rosclaw mcp install --from-git ...`")
+        checks.append(
+            (
+                "RealSense MCPs",
+                ", ".join(installed_ok) if installed_ok else "none",
+                bool(installed_ok),
+            )
+        )
+    except Exception as exc:
+        checks.append(("RealSense MCPs", f"error: {exc}", False))
+
+    # 5. e-URDF profile
+    try:
+        robot_registry = RobotRegistry()
+        profile = robot_registry.get("realsense_d405")
+        checks.append(
+            ("realsense_d405 profile", "found" if profile else "missing", profile is not None)
+        )
+        if not profile:
+            issues.append("realsense_d405 e-URDF profile missing")
+    except Exception as exc:
+        checks.append(("realsense_d405 profile", f"error: {exc}", False))
+        issues.append(f"Could not load realsense_d405 profile: {exc}")
+
+    # 6. Cosmos endpoint (optional)
+    cosmos_reachable = False
+    try:
+        import urllib.request
+
+        req = urllib.request.Request("http://127.0.0.1:5000/health", method="HEAD")
+        req.timeout = 2  # type: ignore[attr-defined]
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            cosmos_reachable = resp.status == 200
+    except Exception:
+        pass
+    checks.append(("Cosmos endpoint", "reachable" if cosmos_reachable else "not reachable", True))
+
+    return checks, warnings, issues
+
+
+def _run_doctor_realsense(args: argparse.Namespace) -> int:
+    """Run RealSense D405 health checks."""
+    checks, warnings, issues = _collect_realsense_checks(args)
+
+    result = {
+        "profile": "realsense",
+        "checks": [{"name": n, "value": v, "ok": o} for n, v, o in checks],
+        "warnings": warnings,
+        "issues": issues,
+        "healthy": len(issues) == 0,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if result["healthy"] else 1
+
+    print("=" * 60)
+    print("ROSClaw Doctor — RealSense D405")
+    print("=" * 60)
+    for name, value, ok in checks:
+        icon = "✅" if ok else "⚠️"
+        print(f"  {icon} {name:<30} {value}")
+    if warnings:
+        print("\nWarnings:")
+        for w in warnings:
+            print(f"  • {w}")
+    if issues:
+        print(f"\nIssues found ({len(issues)}):")
+        for i, issue in enumerate(issues, 1):
+            print(f"  {i}. {issue}")
+    print("=" * 60)
+    return 0 if result["healthy"] else 1
+
+
+def cmd_bench_realsense(args: argparse.Namespace) -> int:
+    """Benchmark RealSense capture and write report.json."""
+    from rosclaw.bench.realsense import bench_realsense
+
+    duration = args.duration
+    output_dir = args.output
+
+    try:
+        report = bench_realsense(duration_sec=duration, output_dir=output_dir)
+    except Exception as exc:
+        print(f"[ROSClaw] RealSense benchmark failed: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+
+    streams = report.get("streams", {})
+    color = streams.get("color", {})
+    depth = streams.get("depth", {})
+    aggregate = report.get("aggregate", {})
+
+    print("=" * 60)
+    print("ROSClaw Bench — RealSense Capture")
+    print("=" * 60)
+    print(f"Duration:      {report.get('duration_requested_sec')}s")
+    print(f"Backend:       {report.get('backend') or 'none'}")
+    print(f"Color frames:  {color.get('frame_count')} @ {color.get('fps')} fps")
+    print(f"Depth frames:  {depth.get('frame_count')} @ {depth.get('fps')} fps")
+    print(f"Total frames:  {aggregate.get('total_frame_count')}")
+    print(f"Average FPS:   {aggregate.get('average_fps')}")
+    print(f"Drops:         {aggregate.get('drop_count')}")
+    print(f"USB mode:      {report.get('usb_mode')}")
+    print(f"Degraded:      {report.get('degraded')}")
+    print(f"Report:        {output_dir}/report.json")
+    if report.get("errors"):
+        print("\nErrors:")
+        for err in report["errors"]:
+            print(f"  • {err}")
+    print("=" * 60)
+    return 0
+
+
+def cmd_runtime_backends(_args: argparse.Namespace) -> int:
+    """List available runtime backends and their health."""
+    backends = [
+        ("mock_runtime", "Mock execution backend for testing", True),
+        ("sandbox_runtime", "Sandbox physics simulation backend", True),
+        ("sdk_runtime", "Robot SDK direct control backend", False),
+        ("ros2_runtime", "ROS2 middleware backend", False),
+    ]
+
+    print("=" * 60)
+    print("ROSClaw Runtime Backends")
+    print("=" * 60)
+    for name, desc, available in backends:
+        icon = "✅" if available else "❌"
+        status = "healthy" if available else "unavailable"
+        print(f"  {icon} {name:<25} {status:<15} {desc}")
+    print("=" * 60)
+    active = [n for n, _, a in backends if a][:1]
+    if active:
+        print(f"Active backend: {active[0]} (sim-only mode)")
+    return 0
+
+
+def cmd_runtime_doctor(args: argparse.Namespace) -> int:
+    """Run runtime health checks and print the report."""
+    from rosclaw.runtime.doctor import RuntimeDoctor
+    from rosclaw.runtime.plugins import (
+        DexHandDoctor,
+        RealSenseDoctor,
+        UnitreeDoctor,
+        URDoctor,
+    )
+
+    doctor = RuntimeDoctor()
+    doctor.register_plugin(RealSenseDoctor())
+    doctor.register_plugin(UnitreeDoctor())
+    doctor.register_plugin(URDoctor())
+    doctor.register_plugin(DexHandDoctor())
+
+    summary = doctor.summary()
+    if getattr(args, "json", False):
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        print("=" * 60)
+        print("ROSClaw Runtime Doctor")
+        print("=" * 60)
+        for check in summary["checks"]:
+            icon = {"ok": "✅", "warn": "⚠️", "error": "❌"}.get(check["status"], "❓")
+            print(f"{icon} [{check['plugin']}/{check['check']}] {check['status']}")
+            print(f"   {check['message']}")
+        print("=" * 60)
+        print(
+            f"Summary: {summary['ok']} ok, {summary['warn']} warn, "
+            f"{summary['error']} error ({summary['total']} total)"
+        )
+    return 0 if summary["error"] == 0 else 1
+
+
+def _runtime_pid_file() -> Path:
+    from rosclaw.firstboot.workspace import resolve_home
+
+    return Path(resolve_home()) / "runtime.pid"
+
+
+def _is_process_alive(pid: int) -> bool:
+    try:
+        import os
+
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_runtime_start(args: argparse.Namespace) -> int:
+    """Start the ROSClaw Runtime Kernel in the foreground."""
+    import signal
+
+    from rosclaw.runtime.service import RuntimeKernelService
+
+    pid_file = _runtime_pid_file()
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text(encoding="utf-8").strip() or "0")
+        except Exception:
+            old_pid = 0
+        if old_pid and _is_process_alive(old_pid):
+            print(f"[ROSClaw] Runtime already running (pid {old_pid}).")
+            return 0
+
+    service = RuntimeKernelService(home=getattr(args, "home", None))
+    service.initialize()
+    service.start()
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    print("[ROSClaw] Runtime Kernel started.")
+    print(f"[ROSClaw] Components: {service.registry.names()}")
+
+    def _shutdown(signum: int, frame: Any) -> None:
+        print("\n[ROSClaw] Stopping Runtime Kernel...")
+        service.stop()
+        pid_file.unlink(missing_ok=True)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    try:
+        while True:
+            import time
+
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.stop()
+        pid_file.unlink(missing_ok=True)
+    return 0
+
+
+def cmd_runtime_stop(_args: argparse.Namespace) -> int:
+    """Stop the ROSClaw Runtime Kernel."""
+    pid_file = _runtime_pid_file()
+    if not pid_file.exists():
+        print("[ROSClaw] Runtime is not running.")
+        return 0
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip() or "0")
+    except Exception:
+        pid = 0
+    pid_file.unlink(missing_ok=True)
+    if pid and _is_process_alive(pid):
+        import os
+        import signal
+
+        os.kill(pid, signal.SIGTERM)
+        print(f"[ROSClaw] Sent stop signal to runtime (pid {pid}).")
+    else:
+        print("[ROSClaw] Runtime stopped.")
+    return 0
+
+
+def cmd_runtime_status(_args: argparse.Namespace) -> int:
+    """Show the ROSClaw Runtime Kernel status."""
+    pid_file = _runtime_pid_file()
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip() or "0")
+        except Exception:
+            pid = 0
+        if pid and _is_process_alive(pid):
+            print(f"[ROSClaw] Runtime is running (pid {pid}).")
+            return 0
+        print("[ROSClaw] Runtime pid file exists but process is not alive.")
+        return 1
+    print("[ROSClaw] Runtime is stopped.")
+    return 0
+
+
+def cmd_test_realsense(args: argparse.Namespace) -> int:
+    """Run a RealSense RGB-D E2E smoke test.
+
+    The smoke test is read-only: it initializes/links a RealSense body (if
+    requested), invokes the ``realsense_capture_rgbd`` skill, and validates
+    that color/depth artifacts were produced.
+    """
+    import time
+
+    from rosclaw.body.resolver import BodyResolver
+    from rosclaw.core.event_bus import get_global_event_bus
+    from rosclaw.firstboot.workspace import resolve_home
+    from rosclaw.skill.builtins import load_builtins
+    from rosclaw.skill_manager.executor import SkillExecutor
+    from rosclaw.skill_manager.registry import SkillRegistry
+
+    home = resolve_home(args.workspace)
+    resolver = BodyResolver(workspace=home)
+
+    # Auto-initialize a RealSense body if the workspace has none linked.
+    if not resolver.is_linked() and args.init:
+        from rosclaw.body.registry import BodyRegistryManager
+
+        body_id = args.body or f"{args.profile.replace('-', '_')}_smoke"
+        manager = BodyRegistryManager(home)
+        manager.create_body(
+            body_id=body_id,
+            profile_id=args.profile,
+            nickname="RealSense smoke test body",
+            force=False,
+        )
+        resolver = BodyResolver(workspace=home)
+
+    if not resolver.is_linked():
+        print("[ROSClaw] No body linked. Run with --init to auto-initialize a RealSense body.")
+        return 1
+
+    body_id = args.body or resolver.get_current_body_yaml().body_instance.get("id")
+
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir
+        else home / "smoke" / f"realsense_{int(time.time())}"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    skill_id = "realsense_capture_rgbd"
+    print(f"[ROSClaw] RealSense E2E smoke test: {skill_id}")
+    print(f"[ROSClaw] Body: {body_id}")
+    print(f"[ROSClaw] Output: {output_dir}")
+
+    registry = SkillRegistry()
+    load_builtins(registry)
+    event_bus = get_global_event_bus()
+    executor = SkillExecutor(event_bus=event_bus, registry=registry, body_resolver=None)
+    parameters: dict[str, Any] = {
+        "body_id": body_id,
+        "output_dir": str(output_dir),
+    }
+    if args.camera:
+        parameters["camera_name"] = args.camera
+
+    result = executor.execute(skill_id, parameters=parameters)
+    handler_result = result.get("handler_result") or result
+
+    if result.get("status") != "success" or handler_result.get("status") != "success":
+        print("[ROSClaw] ❌ RealSense smoke test FAILED")
+        print(json.dumps(result, indent=2, default=str))
+        return 1
+
+    frames = handler_result.get("frames", {})
+    color_path = (
+        frames.get("color", {}).get("path")
+        or handler_result.get("color")
+        or handler_result.get("color_artifact")
+    )
+    depth_path = (
+        frames.get("depth", {}).get("path")
+        or handler_result.get("depth")
+        or handler_result.get("depth_artifact")
+    )
+
+    missing: list[str] = []
+    for label, path in (("color", color_path), ("depth", depth_path)):
+        if not path or not Path(path).exists():
+            missing.append(label)
+
+    if missing:
+        print(f"[ROSClaw] ❌ RealSense smoke test FAILED: missing {', '.join(missing)} artifacts")
+        print(json.dumps(handler_result, indent=2, default=str))
+        return 1
+
+    print("[ROSClaw] ✅ RealSense smoke test PASSED")
+    print(f"  color: {color_path}")
+    print(f"  depth: {depth_path}")
+    return 0
+
+
+def cmd_forge_sdk_to_mcp(args: argparse.Namespace) -> int:
+    """Convert an SDK description to an MCP bundle."""
+    from rosclaw.forge.bundle_compiler import BundleCompiler
+
+    name = args.name
+    output_dir = Path(args.output)
+    sdk_doc = args.sdk_docs
+
+    print(f"[ROSClaw] Forge SDK-to-MCP: {name}")
+    print(f"[ROSClaw] Output: {output_dir}")
+
+    try:
+        compiler = BundleCompiler()
+        output = compiler.compile(sdk_doc, name)
+
+        # Write generated files
+        for filepath, content in output.files.items():
+            full_path = output_dir / filepath
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(content, encoding="utf-8")
+            print(f"[ROSClaw]   Generated: {filepath}")
+
+        print("=" * 60)
+        print("Forge SDK-to-MCP Result")
+        print("=" * 60)
+        print(f"Bundle:         {output.bundle_name}")
+        print(f"Files:          {len(output.files)}")
+        print(f"Staging ready:  {output.staging_ready}")
+        print(f"Production:     {output.production_ready}")
+        print("Validation:")
+        for check, passed in output.validation.items():
+            icon = "✅" if passed else "❌"
+            print(f"  {icon} {check}")
+        print("=" * 60)
+        print("\nNext steps:")
+        print(f"  rosclaw forge validate {output_dir / name}")
+        print(f"  rosclaw forge install {output_dir / name} --staging")
+        return 0
+    except Exception as exc:
+        print(f"[ROSClaw] ❌ SDK-to-MCP failed: {exc}")
+        return 1
+
+
+def cmd_forge_validate(args: argparse.Namespace) -> int:
+    """Validate a Forge bundle."""
+
+    bundle_path = Path(args.bundle_path)
+    if not bundle_path.exists():
+        print(f"[ROSClaw] ❌ Bundle path not found: {bundle_path}")
+        return 1
+
+    print(f"[ROSClaw] Validating bundle: {bundle_path}")
+
+    # Check required files exist
+    required_files = ["robot.eurdf.yaml", "safety.yaml", "capabilities.yaml"]
+    errors = []
+    warnings = []
+    file_count = 0
+
+    for f in bundle_path.iterdir():
+        if f.is_file():
+            file_count += 1
+
+    for req in required_files:
+        if not (bundle_path / req).exists():
+            errors.append(f"Missing required file: {req}")
+
+    # Optional files
+    optional = ["semantic.yaml", "benchmark.yaml", "robot.urdf", "robot.mjcf.xml"]
+    for opt in optional:
+        if not (bundle_path / opt).exists():
+            warnings.append(f"Missing optional file: {opt}")
+
+    valid = len(errors) == 0
+
+    print("=" * 60)
+    print("Forge Bundle Validation")
+    print("=" * 60)
+    print(f"Bundle:     {bundle_path.name}")
+    print(f"Valid:      {'✅ YES' if valid else '❌ NO'}")
+    print(f"Files:      {file_count}")
+    if errors:
+        print("Errors:")
+        for e in errors:
+            print(f"  🚫 {e}")
+    if warnings:
+        print("Warnings:")
+        for w in warnings:
+            print(f"  ⚠️  {w}")
+    print("=" * 60)
+    return 0 if valid else 1
+
+
+def cmd_forge_install(args: argparse.Namespace) -> int:
+    """Install a Forge bundle to staging or production."""
+    from rosclaw.forge.bundle_compiler import BundleCompiler
+
+    bundle_path = Path(args.bundle_path)
+    if not bundle_path.exists():
+        print(f"[ROSClaw] ❌ Bundle path not found: {bundle_path}")
+        return 1
+
+    target = "staging" if args.staging else "production"
+    print(f"[ROSClaw] Installing bundle to {target}: {bundle_path}")
+    try:
+        compiler = BundleCompiler()
+        result = compiler.install_bundle(bundle_path, staging=args.staging)
+        print("=" * 60)
+        print(f"Forge Bundle Install ({target})")
+        print("=" * 60)
+        print(f"Status:     {result.get('status', 'N/A')}")
+        print(f"Location:   {result.get('install_path', 'N/A')}")
+        if result.get("tools_added"):
+            print(f"Tools:      {', '.join(result['tools_added'])}")
+        print("=" * 60)
+        return 0 if result.get("status") == "installed" else 1
+    except Exception as exc:
+        print(f"[ROSClaw] ❌ Install error: {exc}")
+        return 1
+
+
+def cmd_stop(_args: argparse.Namespace) -> int:
+    """Stop ROSClaw runtime."""
+    import os
+    import signal
+
+    pid_file = get_rosclaw_home() / "runtime.pid"
+    if pid_file.exists():
+        pid = int(pid_file.read_text().strip())
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"[ROSClaw] Stopped runtime (PID {pid})")
+            pid_file.unlink()
+            return 0
+        except ProcessLookupError:
+            print(f"[ROSClaw] Runtime PID {pid} not found")
+            pid_file.unlink()
+            return 1
+    else:
+        print("[ROSClaw] No runtime PID file found. Runtime may not be running.")
+        return 1
+
+
+def cmd_fleet_status(args: argparse.Namespace) -> int:
+    """Show fleet-wide body status and readiness summary."""
+    workspace = Path(args.workspace) if args.workspace else get_rosclaw_home()
+    manager = BodyRegistryManager(workspace)
+    bodies = manager.list_bodies()
+
+    rows: list[dict[str, Any]] = []
+    for entry in bodies:
+        row: dict[str, Any] = {
+            "body_id": entry.body_id,
+            "nickname": entry.nickname,
+            "profile_id": entry.profile_id,
+            "current": entry.body_id == manager.get_current_body_id(),
+            "linked": False,
+            "readiness": "unknown",
+        }
+        with contextlib.suppress(Exception):
+            resolver = BodyResolver(workspace, body_id=entry.body_id)
+            row["linked"] = resolver.is_linked()
+            if resolver.is_linked():
+                effective = resolver.get_effective_body(recompile_if_stale=False)
+                row["readiness"] = effective.readiness.get("overall", "unknown")
+        rows.append(row)
+
+    if args.json:
+        print(
+            json.dumps(
+                {"current": manager.get_current_body_id(), "bodies": rows}, indent=2, default=str
+            )
+        )
+        return 0
+
+    print(f"Fleet status ({len(rows)} bodies, current: {manager.get_current_body_id()})")
+    for row in rows:
+        marker = "*" if row["current"] else " "
+        print(
+            f" {marker} {row['body_id']:<20} {row['profile_id']:<20} "
+            f"linked={row['linked']:<5} readiness={row['readiness']}"
+        )
+    return 0
+
+
+def cmd_fleet_stop(args: argparse.Namespace) -> int:
+    """Broadcast an emergency stop event for every registered body."""
+    workspace = Path(args.workspace) if args.workspace else get_rosclaw_home()
+    manager = BodyRegistryManager(workspace)
+    bodies = manager.list_bodies()
+    if not bodies:
+        print("[ROSClaw] No bodies registered; nothing to stop.")
+        return 0
+
+    # Publish an event for each body. If the runtime is not running, the
+    # global bus will have no subscribers, so we still advise physical E-stop.
+    from rosclaw.core.event_bus import get_global_event_bus
+
+    bus = get_global_event_bus()
+    for entry in bodies:
+        event = Event(
+            topic="robot.emergency_stop",
+            payload={
+                "reason": args.reason,
+                "source": "rosclaw.fleet.stop",
+                "body_id": entry.body_id,
+            },
+            source="rosclaw.cli",
+            priority=EventPriority.CRITICAL,
+        )
+        bus.publish(event)
+        print(f"[ROSClaw] Emergency stop event published for body '{entry.body_id}': {args.reason}")
+
+    print(
+        "[ROSClaw] Fleet stop broadcast complete. If the runtime is not running, "
+        "activate each robot's physical E-stop manually."
+    )
+    return 0
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    """Restart ROSClaw runtime."""
+    print("[ROSClaw] Restarting runtime...")
+    cmd_stop(args)
+    import time
+
+    time.sleep(1)
+    return cmd_run(args)
+
+
+def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "simforge":
+        from rosclaw.simforge.cli import dispatch_simforge_argv
+
+        result = dispatch_simforge_argv(sys.argv[1:])
+        if result is None:
+            raise RuntimeError("simforge command was not dispatched")
+        return result
+
+    parser = argparse.ArgumentParser(
+        prog="rosclaw",
+        description="ROSClaw - Self-Evolving Runtime Infrastructure for Physical AI & Embodied Agents",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_version()}",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # The full SimForge parser is loaded lazily by the early dispatch above.
+    subparsers.add_parser("simforge", help="Run simulation qualification and evolution")
+
+    # init
+    init_parser = subparsers.add_parser("init", help="Initialize a ROSClaw workspace")
+    init_parser.add_argument("dir", nargs="?", default=".", help="Target directory")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite existing config")
+
+    # setup (optional integrations)
+    setup_parser = subparsers.add_parser("setup", help="Setup optional integrations")
+    setup_subparsers = setup_parser.add_subparsers(dest="setup_command")
+
+    setup_lerobot_parser = setup_subparsers.add_parser("lerobot", help="Setup LeRobot integration")
+    setup_lerobot_parser.add_argument(
+        "--profile", default="core", choices=["core"], help="Installation profile (P0.1: core)"
+    )
+    setup_lerobot_parser.add_argument(
+        "--mode",
+        default="auto",
+        choices=["auto", "current-env", "isolated", "external"],
+        help=(
+            "Install mode: auto (default), current-env, isolated, or external. "
+            "auto uses current env if Python >=3.12, otherwise creates an isolated runtime."
+        ),
+    )
+    setup_lerobot_parser.add_argument(
+        "--python",
+        default=None,
+        help="Python executable for external mode or Python 3.12 executable for isolated mode",
+    )
+    setup_lerobot_parser.add_argument(
+        "--runtime-path",
+        default=None,
+        help="Target path for isolated runtime (default: ~/.rosclaw/envs/lerobot)",
+    )
+    setup_lerobot_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be installed"
+    )
+    setup_lerobot_parser.add_argument("--upgrade", action="store_true", help="Upgrade packages")
+    setup_lerobot_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Recreate isolated runtime or overwrite existing config",
+    )
+    setup_lerobot_parser.add_argument(
+        "--index-url", default=None, help="Base URL of Python package index"
+    )
+    setup_lerobot_parser.add_argument(
+        "--extra-index-url", default=None, help="Extra URL of Python package index"
+    )
+    setup_lerobot_parser.add_argument(
+        "--reference-policy",
+        default=None,
+        choices=["rh56"],
+        help=(
+            "After install, also install + smoke-verify a bundled reference "
+            "policy worker plugin (rh56: lerobot-policy-rosclaw-rh56)"
+        ),
+    )
+    setup_lerobot_parser.add_argument("--json", action="store_true", help="Output JSON details")
+
+    # The public entrypoint dispatches this command before importing the legacy
+    # CLI. Keep it in top-level help so operators and agents can discover it.
+    subparsers.add_parser(
+        "daemon",
+        help="Inspect or call the local rosclawd control plane",
+        add_help=False,
+    )
+
+    app_parser = subparsers.add_parser("app", help="Install, author, and run Capability Apps")
+    app_subparsers = app_parser.add_subparsers(dest="app_command")
+    add_app_subparsers(app_subparsers)
+
+    # run / start
+    for name in ("run", "start"):
+        run_parser = subparsers.add_parser(name, help="Start ROSClaw runtime")
+        run_parser.add_argument("--robot-id", default="rosclaw_default", help="Robot identifier")
+        run_parser.add_argument("--model-path", default=None, help="Path to robot model file")
+        run_parser.add_argument(
+            "--firewall", action="store_true", default=True, help="Enable Digital Twin Firewall"
+        )
+        run_parser.add_argument(
+            "--memory", action="store_true", default=True, help="Enable Memory module"
+        )
+        run_parser.add_argument(
+            "--practice", action="store_true", default=True, help="Enable Practice recorder"
+        )
+        run_parser.add_argument(
+            "--swarm", action="store_true", default=False, help="Enable Swarm coordination"
+        )
+
+    status_parser = subparsers.add_parser("status", help="Show runtime status")
+    status_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    status_subparsers = status_parser.add_subparsers(dest="status_command")
+    status_capabilities_parser = status_subparsers.add_parser(
+        "capabilities", help="Show evidence-backed product capability status"
+    )
+    status_capabilities_parser.add_argument(
+        "--json", action="store_true", help="Output canonical status YAML as JSON"
+    )
+    subparsers.add_parser("stop", help="Stop ROSClaw runtime")
+
+    explain_parser = subparsers.add_parser("explain", help="Explain an evidence-bearing run")
+    explain_parser.add_argument(
+        "run_reference",
+        nargs="?",
+        default="latest",
+        help="Run ID or 'latest' (default: latest)",
+    )
+    explain_parser.add_argument("--home", default=None, help="ROSCLAW_HOME override")
+    explain_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # restart (uses same args as run)
+    restart_parser = subparsers.add_parser("restart", help="Restart ROSClaw runtime")
+    restart_parser.add_argument("--robot-id", default="rosclaw_default", help="Robot identifier")
+    restart_parser.add_argument("--model-path", default=None, help="Path to robot model file")
+    restart_parser.add_argument(
+        "--firewall", action="store_true", default=True, help="Enable Digital Twin Firewall"
+    )
+    restart_parser.add_argument(
+        "--memory", action="store_true", default=True, help="Enable Memory module"
+    )
+    restart_parser.add_argument(
+        "--practice", action="store_true", default=True, help="Enable Practice recorder"
+    )
+    restart_parser.add_argument(
+        "--swarm", action="store_true", default=False, help="Enable Swarm coordination"
+    )
+
+    # dashboard
+    dashboard_parser = subparsers.add_parser(
+        "dashboard", help="Start the ROSClaw dashboard web server"
+    )
+    dashboard_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show dashboard status summary instead of starting the server",
+    )
+    dashboard_parser.add_argument(
+        "--open", action="store_true", help="Deprecated: dashboard now starts the server by default"
+    )
+    dashboard_parser.add_argument(
+        "--host", default="0.0.0.0", help="Host to bind the dashboard server"
+    )
+    dashboard_parser.add_argument(
+        "--port", type=int, default=8765, help="Port to bind the dashboard server"
+    )
+    dashboard_parser.add_argument("--trace", default=None, help="Open the dashboard on a trace ID")
+
+    # structured physical-intelligence trace
+    trace_parser = subparsers.add_parser("trace", help="Inspect structured runtime traces")
+    trace_subparsers = trace_parser.add_subparsers(dest="trace_command")
+
+    def add_trace_store_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--home", default=None, help="ROSCLAW_HOME containing traces/")
+        parser.add_argument("--path", default=None, help="Explicit live.jsonl trace path")
+
+    trace_list_parser = trace_subparsers.add_parser("list", help="List recent traces")
+    trace_list_parser.add_argument("--limit", type=int, default=50)
+    trace_list_parser.add_argument("--json", action="store_true")
+    add_trace_store_args(trace_list_parser)
+
+    trace_show_parser = trace_subparsers.add_parser("show", help="Show one trace as a span tree")
+    trace_show_parser.add_argument("trace_id")
+    trace_show_parser.add_argument("--tree", action="store_true", help="Show tree (default)")
+    trace_show_parser.add_argument(
+        "--provider", action="store_true", help="Show only LLM/VLM spans"
+    )
+    trace_show_parser.add_argument("--json", action="store_true")
+    add_trace_store_args(trace_show_parser)
+
+    trace_tail_parser = trace_subparsers.add_parser("tail", help="Show recent completed spans")
+    trace_tail_parser.add_argument("--trace-id", default=None)
+    trace_tail_parser.add_argument("--kind", default=None, help="Comma-separated span kinds")
+    trace_tail_parser.add_argument("--status", default=None, help="Comma-separated statuses")
+    trace_tail_parser.add_argument("--limit", type=int, default=100)
+    trace_tail_parser.add_argument("--follow", action="store_true")
+    trace_tail_parser.add_argument("--json", action="store_true")
+    add_trace_store_args(trace_tail_parser)
+
+    trace_explain_parser = trace_subparsers.add_parser(
+        "explain", help="Show one span/event with its evidence"
+    )
+    trace_explain_parser.add_argument("event_id")
+    add_trace_store_args(trace_explain_parser)
+
+    trace_export_parser = trace_subparsers.add_parser("export", help="Export one trace")
+    trace_export_parser.add_argument("trace_id")
+    trace_export_parser.add_argument("--format", choices=["json", "jsonl"], default="json")
+    trace_export_parser.add_argument("--output", default=None)
+    add_trace_store_args(trace_export_parser)
+
+    trace_replay_parser = trace_subparsers.add_parser(
+        "replay", help="Replay a trace as an ordered textual timeline"
+    )
+    trace_replay_parser.add_argument("trace_id")
+    trace_replay_parser.add_argument("--json", action="store_true")
+    add_trace_store_args(trace_replay_parser)
+
+    # doctor
+    doctor_parser = subparsers.add_parser("doctor", help="Run health diagnosis")
+    doctor_parser.add_argument(
+        "--ros2", action="store_true", help="Check ROS2 environment profile (L1-L5)"
+    )
+    doctor_parser.add_argument(
+        "--ros", action="store_true", help="Check rosbridge ROS connector profile (no rclpy)"
+    )
+    doctor_parser.add_argument(
+        "--realsense", action="store_true", help="Check RealSense D405 stack"
+    )
+    doctor_parser.add_argument(
+        "--endpoint", default="ws://127.0.0.1:9090", help="rosbridge endpoint for --ros check"
+    )
+    doctor_parser.add_argument("--bootstrap", action="store_true", help="L0 bootstrap check only")
+    doctor_parser.add_argument("--full", action="store_true", help="Run L1-L3 full health check")
+    doctor_parser.add_argument(
+        "--level",
+        choices=["package", "configured", "runtime", "connected", "execution", "verified"],
+        default=None,
+        help="Run progressive execution-readiness checks",
+    )
+    doctor_parser.add_argument("--fix", action="store_true", help="Auto-fix safe issues only")
+    doctor_parser.add_argument("--json", action="store_true", help="Output structured JSON")
+    doctor_parser.add_argument("--gpu", action="store_true", help="Include GPU/CUDA check")
+    doctor_parser.add_argument(
+        "--network", action="store_true", help="Include network reachability check"
+    )
+
+    # firstboot
+    firstboot_parser = subparsers.add_parser("firstboot", help="Run ROSClaw first boot wizard")
+    firstboot_parser.add_argument(
+        "--yes", action="store_true", help="Non-interactive mode with defaults"
+    )
+    firstboot_parser.add_argument("--workspace", default=None, help="Custom workspace path")
+    firstboot_parser.add_argument(
+        "--profile", choices=["offline", "cloud", "hybrid"], default="offline"
+    )
+    firstboot_parser.add_argument("--robot", default="sim_ur5e", help="Default robot profile")
+    firstboot_parser.add_argument(
+        "--safety", choices=["strict", "moderate", "relaxed"], default="strict"
+    )
+    firstboot_parser.add_argument("--enable-sandbox", action="store_true", help="Enable sandbox")
+    firstboot_parser.add_argument("--disable-sandbox", action="store_true", help="Disable sandbox")
+    firstboot_parser.add_argument(
+        "--enable-mcp", action="store_true", help="Enable MCP config generation"
+    )
+    firstboot_parser.add_argument(
+        "--disable-mcp", action="store_true", help="Disable MCP config generation"
+    )
+    firstboot_parser.add_argument("--enable-ros2", action="store_true", help="Enable ROS 2 mode")
+    firstboot_parser.add_argument(
+        "--enable-memory", action="store_true", help="Enable memory module"
+    )
+    firstboot_parser.add_argument(
+        "--enable-practice", action="store_true", help="Enable practice capture"
+    )
+    firstboot_parser.add_argument(
+        "--enable-auto", action="store_true", help="Enable auto evolution"
+    )
+    firstboot_parser.add_argument(
+        "--telemetry", action="store_true", help="Enable anonymous telemetry"
+    )
+    firstboot_parser.add_argument(
+        "--no-telemetry", action="store_true", help="Disable anonymous telemetry"
+    )
+    firstboot_parser.add_argument(
+        "--diagnostics", action="store_true", help="Allow redacted diagnostic upload"
+    )
+    firstboot_parser.add_argument(
+        "--no-diagnostics", action="store_true", help="Disallow redacted diagnostic upload"
+    )
+    firstboot_parser.add_argument(
+        "--rich-feedback", action="store_true", help="Allow manual rich feedback upload"
+    )
+    firstboot_parser.add_argument(
+        "--no-rich-feedback", action="store_true", help="Disallow manual rich feedback upload"
+    )
+    firstboot_parser.add_argument("--dev", action="store_true", help="Developer mode")
+    firstboot_parser.add_argument(
+        "--force", action="store_true", help="Re-run even if already initialized"
+    )
+    firstboot_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be done without writing"
+    )
+    firstboot_parser.add_argument("--json", action="store_true", help="JSON output")
+
+    # config
+    config_parser = subparsers.add_parser("config", help="Configuration commands")
+    config_subparsers = config_parser.add_subparsers(dest="config_command")
+    config_subparsers.add_parser("show", help="Show current config")
+    config_subparsers.add_parser("path", help="Show config file path")
+    config_subparsers.add_parser("validate", help="Validate config schema")
+    config_edit_parser = config_subparsers.add_parser("edit", help="Open config in editor")
+    config_edit_parser.add_argument(
+        "--editor", default=None, help="Editor command (default: $EDITOR or nano)"
+    )
+
+    # db (storage diagnostics)
+    db_parser = add_db_subparser(subparsers)
+
+    # profile
+    profile_parser = subparsers.add_parser("profile", help="Profile management")
+    profile_subparsers = profile_parser.add_subparsers(dest="profile_command")
+    profile_subparsers.add_parser("list", help="List available profiles")
+    profile_use_parser = profile_subparsers.add_parser("use", help="Activate a profile")
+    profile_use_parser.add_argument(
+        "profile_name", choices=["offline", "cloud", "hybrid", "ros2", "sim"]
+    )
+    profile_subparsers.add_parser("current", help="Show active profile")
+
+    # uninstall
+    uninstall_parser = subparsers.add_parser("uninstall", help="Uninstall ROSClaw")
+    uninstall_parser.add_argument("--keep-data", action="store_true", help="Keep ~/.rosclaw data")
+    uninstall_parser.add_argument(
+        "--purge", action="store_true", help="Remove everything including data"
+    )
+
+    # logs
+    logs_parser = subparsers.add_parser("logs", help="Show runtime logs")
+    logs_parser.add_argument("--tail", type=int, default=30, help="Show last N lines (default: 30)")
+    logs_parser.add_argument(
+        "--level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Filter by log level",
+    )
+    logs_parser.add_argument("--module", default=None, help="Filter by module name")
+    logs_parser.add_argument(
+        "--files", type=int, default=5, help="Number of log files to show (default: 5)"
+    )
+
+    # events
+    events_parser = subparsers.add_parser("events", help="EventBus commands")
+    events_subparsers = events_parser.add_subparsers(dest="events_command")
+    events_tail_parser = events_subparsers.add_parser("tail", help="Tail EventBus events")
+    events_tail_parser.add_argument("--tail", type=int, default=20, help="Show last N events")
+    events_publish_parser = events_subparsers.add_parser("publish", help="Publish an event")
+    events_publish_parser.add_argument("topic", help="Event topic")
+    events_publish_parser.add_argument("--payload", default="{}", help="JSON payload")
+    events_publish_parser.add_argument("--source", default="cli", help="Event source")
+    events_publish_parser.add_argument("--trace-id", default=None, help="Trace ID")
+    events_list_parser = events_subparsers.add_parser("list", help="List published events")
+    events_list_parser.add_argument("--limit", type=int, default=50, help="Max events to show")
+    # backward compat: events --tail N
+    events_parser.add_argument("--tail", type=int, default=20, help="Show last N events")
+    events_parser.set_defaults(events_command=None)
+
+    # robot subcommand
+    add_ros_subparser(subparsers)
+    add_body_subparser(subparsers)
+    add_eurdf_subparser(subparsers)
+    add_hub_subparser(subparsers)
+    robot_parser = subparsers.add_parser("robot", help="Robot registry commands")
+    robot_subparsers = robot_parser.add_subparsers(dest="robot_command")
+
+    add_robot_pack_subparsers(robot_subparsers)
+
+    robot_subparsers.add_parser("list", help="List available robots")
+
+    robot_inspect_parser = robot_subparsers.add_parser("inspect", help="Inspect robot profile")
+    robot_inspect_parser.add_argument("robot_id", help="Robot identifier")
+    robot_inspect_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    robot_validate_parser = robot_subparsers.add_parser("validate", help="Validate robot e-URDF")
+    robot_validate_parser.add_argument("robot_id", help="Robot identifier")
+
+    # how subcommand
+    how_parser = subparsers.add_parser("how", help="How recovery commands")
+    how_subparsers = how_parser.add_subparsers(dest="how_command")
+
+    how_explain_parser = how_subparsers.add_parser("explain", help="Explain failure episode")
+    how_explain_parser.add_argument("episode_id", help="Episode identifier")
+
+    how_recover_parser = how_subparsers.add_parser("recover", help="Generate recovery plan")
+    how_recover_parser.add_argument("episode_id", help="Episode identifier")
+    how_recover_parser.add_argument("--output", default=None, help="Output file for recovery plan")
+
+    how_advise_parser = how_subparsers.add_parser(
+        "advise", help="Advise on a failure using episode evidence"
+    )
+    how_advise_parser.add_argument("--body", required=True, help="Body instance identifier")
+    how_advise_parser.add_argument("--failure", required=True, help="Failure symptom or label")
+    how_advise_parser.add_argument("--episode-id", required=True, help="Episode identifier")
+    _add_practice_data_root_argument(how_advise_parser)
+    how_advise_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    from rosclaw.how.selective.cli import register_selective_commands
+
+    register_selective_commands(how_subparsers)
+
+    from rosclaw.how.choreography.cli import register_replay_patch_command
+
+    register_replay_patch_command(how_subparsers)
+
+    # provider subcommand
+    provider_parser = subparsers.add_parser("provider", help="Provider commands")
+    provider_subparsers = provider_parser.add_subparsers(dest="provider_command")
+    provider_subparsers.add_parser("list", help="List registered providers")
+
+    provider_health_parser = provider_subparsers.add_parser(
+        "health", help="Show provider health and capability contracts"
+    )
+    provider_health_parser.add_argument(
+        "provider_id", nargs="?", default=None, help="Optional provider identifier"
+    )
+    provider_health_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_route_parser = provider_subparsers.add_parser(
+        "route", help="Explain provider route selection for a capability"
+    )
+    provider_route_parser.add_argument(
+        "--capability",
+        required=True,
+        help="Capability to route, e.g. vlm.scene_graph",
+    )
+    provider_route_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_benchmark_parser = provider_subparsers.add_parser(
+        "benchmark", help="Plan a provider benchmark without invoking external models"
+    )
+    provider_benchmark_parser.add_argument(
+        "--dry-run", action="store_true", help="Generate a benchmark plan only"
+    )
+    provider_benchmark_parser.add_argument(
+        "--capability",
+        action="append",
+        default=[],
+        help="Capability to include; repeat for multiple capabilities",
+    )
+    provider_benchmark_parser.add_argument(
+        "--provider",
+        action="append",
+        default=[],
+        help="Provider to include; repeat for multiple providers",
+    )
+    provider_benchmark_parser.add_argument(
+        "--iterations", type=int, default=1, help="Planned iterations per capability"
+    )
+    provider_benchmark_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_invoke_parser = provider_subparsers.add_parser(
+        "invoke", help="Invoke a provider capability"
+    )
+    provider_invoke_parser.add_argument(
+        "provider_id", nargs="?", default=None, help="Provider identifier (e.g., gpu_cosmos, llm)"
+    )
+    provider_invoke_parser.add_argument(
+        "input", nargs="?", default="{}", help="Input data (JSON string or text)"
+    )
+    provider_invoke_parser.add_argument(
+        "--image", dest="image_path", default=None, help="Path to an image file to include as input"
+    )
+    provider_invoke_parser.add_argument(
+        "--capability", default=None, help="Capability to invoke (e.g., vlm.risk_assessment)"
+    )
+    provider_invoke_parser.add_argument(
+        "--question", default=None, help="Natural-language question/prompt"
+    )
+    provider_invoke_parser.add_argument(
+        "--output", dest="output_path", default=None, help="Output JSON file for normalized result"
+    )
+    provider_invoke_parser.add_argument(
+        "--provider", dest="provider_id_opt", default=None, help="Alias for provider_id"
+    )
+    provider_invoke_parser.add_argument(
+        "--trace-id", default=None, help="Trace ID for the invocation"
+    )
+    provider_invoke_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_infer_parser = provider_subparsers.add_parser(
+        "infer", help="Infer from a provider manifest"
+    )
+    provider_infer_parser.add_argument(
+        "--type", required=True, help="Provider type (e.g., lerobot_policy)"
+    )
+    provider_infer_parser.add_argument(
+        "--manifest", required=True, help="Path to provider.yaml manifest"
+    )
+    provider_infer_parser.add_argument("--input", required=True, help="Path to input JSON file")
+    provider_infer_parser.add_argument(
+        "--policy.path", dest="policy_path", default=None, help="Policy directory or HF repo id"
+    )
+    provider_infer_parser.add_argument(
+        "--worker",
+        choices=["auto", "subprocess", "in-process"],
+        default="auto",
+        help="Worker execution mode (default: auto)",
+    )
+    provider_infer_parser.add_argument(
+        "--device", default="cpu", help="Device for inference (default: cpu)"
+    )
+    provider_infer_parser.add_argument(
+        "--allow-network", action="store_true", help="Allow network access for HF downloads"
+    )
+    provider_infer_parser.add_argument(
+        "--timeout-sec", type=int, default=120, help="Worker timeout in seconds (default: 120)"
+    )
+    provider_infer_parser.add_argument("--output", default=None, help="Output JSON file")
+    provider_infer_parser.add_argument("--dry-run", action="store_true", help="Dry-run mode")
+    provider_infer_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_inspect_parser = provider_subparsers.add_parser(
+        "inspect", help="Inspect a LeRobot policy manifest/config"
+    )
+    provider_inspect_parser.add_argument(
+        "--type", required=True, help="Provider type (e.g., lerobot_policy)"
+    )
+    provider_inspect_parser.add_argument(
+        "--manifest", required=True, help="Path to provider.yaml manifest"
+    )
+    provider_inspect_parser.add_argument(
+        "--policy.path", dest="policy_path", required=True, help="Policy directory or HF repo id"
+    )
+    provider_inspect_parser.add_argument(
+        "--revision", default="main", help="HF revision if policy.path is a repo id"
+    )
+    provider_inspect_parser.add_argument(
+        "--allow-network", action="store_true", help="Allow network access for HF downloads"
+    )
+    provider_inspect_parser.add_argument(
+        "--timeout-sec", type=int, default=60, help="Worker timeout in seconds (default: 60)"
+    )
+    provider_inspect_parser.add_argument("--output", default=None, help="Output JSON file")
+    provider_inspect_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_load_test_parser = provider_subparsers.add_parser(
+        "load-test", help="Load-test a LeRobot policy (load weights, no inference)"
+    )
+    provider_load_test_parser.add_argument(
+        "--type", required=True, help="Provider type (e.g., lerobot_policy)"
+    )
+    provider_load_test_parser.add_argument(
+        "--manifest", required=True, help="Path to provider.yaml manifest"
+    )
+    provider_load_test_parser.add_argument(
+        "--policy.path", dest="policy_path", required=True, help="Policy directory or HF repo id"
+    )
+    provider_load_test_parser.add_argument(
+        "--device", default="cpu", help="Device for loading (default: cpu)"
+    )
+    provider_load_test_parser.add_argument(
+        "--allow-network", action="store_true", help="Allow network access for HF downloads"
+    )
+    provider_load_test_parser.add_argument(
+        "--timeout-sec", type=int, default=120, help="Worker timeout in seconds (default: 120)"
+    )
+    provider_load_test_parser.add_argument("--output", default=None, help="Output JSON file")
+    provider_load_test_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    provider_diagnose_parser = provider_subparsers.add_parser(
+        "diagnose", help="Diagnose provider interfaces against the active body"
+    )
+    provider_diagnose_parser.add_argument(
+        "--body", default="current", help="Body ID to diagnose (default: current)"
+    )
+    provider_diagnose_parser.add_argument("--workspace", default=None, help="ROSClaw workspace")
+    provider_diagnose_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    provider_diagnose_parser.add_argument(
+        "--available",
+        action="append",
+        default=[],
+        help="Treat interface name as reported available",
+    )
+
+    # capability subcommand
+    capability_parser = subparsers.add_parser("capability", help="Capability registry commands")
+    capability_subparsers = capability_parser.add_subparsers(dest="capability_command")
+    capability_list_parser = capability_subparsers.add_parser("list", help="List all capabilities")
+    capability_list_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # lerobot subcommand
+    lerobot_parser = subparsers.add_parser("lerobot", help="LeRobot integration commands")
+    lerobot_subparsers = lerobot_parser.add_subparsers(dest="lerobot_command")
+    lerobot_doctor_parser = lerobot_subparsers.add_parser(
+        "doctor", help="Diagnose LeRobot integration"
+    )
+    lerobot_doctor_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    lerobot_info_parser = lerobot_subparsers.add_parser("info", help="Run lerobot-info")
+    lerobot_info_parser.add_argument(
+        "args", nargs="*", help="Additional arguments passed to lerobot-info"
+    )
+    lerobot_capabilities_parser = lerobot_subparsers.add_parser(
+        "capabilities", help="List LeRobot capabilities"
+    )
+    lerobot_capabilities_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_smoke_parser = lerobot_subparsers.add_parser(
+        "smoke-policy", help="Run a real LeRobot policy smoke test"
+    )
+    lerobot_smoke_parser.add_argument(
+        "--policy.path",
+        dest="policy_path",
+        default=DEFAULT_SMOKE_POLICY,
+        help=f"Policy directory or HF repo id (default: {DEFAULT_SMOKE_POLICY})",
+    )
+    lerobot_smoke_parser.add_argument("--revision", default="main", help="HF revision")
+    lerobot_smoke_parser.add_argument(
+        "--device", default="cpu", help="Device for inference (default: cpu)"
+    )
+    lerobot_smoke_parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Model dtype (default: auto)",
+    )
+    lerobot_smoke_parser.add_argument(
+        "--allow-network", action="store_true", help="Allow network access for HF downloads"
+    )
+    lerobot_smoke_parser.add_argument(
+        "--timeout-sec", type=int, default=300, help="Worker timeout in seconds (default: 300)"
+    )
+    lerobot_smoke_parser.add_argument("--output", default=None, help="Output JSON file")
+    lerobot_smoke_parser.add_argument(
+        "--keep-worker-files", action="store_true", help="Keep worker temp files"
+    )
+    lerobot_smoke_parser.add_argument(
+        "--force-download", action="store_true", help="Force re-download of cached policy"
+    )
+    lerobot_smoke_parser.add_argument(
+        "--skip-infer", action="store_true", help="Skip inference stage"
+    )
+    lerobot_smoke_parser.add_argument(
+        "--observation-file", default=None, help="Path to observation JSON file"
+    )
+    lerobot_smoke_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_compatibility_parser = lerobot_subparsers.add_parser(
+        "compatibility", help="Show LeRobot policy compatibility matrix"
+    )
+    lerobot_compatibility_parser.add_argument(
+        "--policy-type", default=None, help="Focus on a single policy type (e.g., act, diffusion)"
+    )
+    lerobot_compatibility_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_export_dataset_parser = lerobot_subparsers.add_parser(
+        "export-dataset", help="Export a ROSClaw Practice episode to a real LeRobotDataset"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--episode",
+        dest="episode_dir",
+        required=True,
+        help="Path to the Practice episode directory",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--output", required=True, help="Output directory for the LeRobotDataset"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--repo-id", required=True, help="Dataset repo id (e.g., local/rosclaw_minimal)"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--fps", type=float, default=10.0, help="Frames per second (default: 10)"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--task", default=None, help="Override task text for the exported episode"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--robot-id", default=None, help="Override robot id metadata"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--body-profile", default=None, help="Override body profile metadata"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--use-videos",
+        action="store_true",
+        help="Encode camera frames as MP4 videos (default: images)",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--visual-storage-mode",
+        choices=["auto", "images", "videos"],
+        default="auto",
+        help="Visual storage mode (default: auto resolves to images for short episodes)",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--profile",
+        choices=["minimal", "safety", "physical", "safety-rich"],
+        default="minimal",
+        help="ROSClaw feature profile (default: minimal)",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--include",
+        dest="include_groups",
+        default=None,
+        help="Comma-separated extra feature groups to include (e.g. safety,failure)",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--include-body-snapshot",
+        action="store_true",
+        help="Copy body YAML snapshot into meta/rosclaw/body_snapshot/",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--body-snapshot-mode",
+        choices=["none", "sanitized", "full"],
+        default="sanitized",
+        help="Body snapshot sanitization mode (default: sanitized)",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--acknowledge-sensitive-body-data",
+        action="store_true",
+        help="Required when --body-snapshot-mode=full to confirm export of sensitive body data",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--dataloader", action="store_true", help="Also run a DataLoader smoke test after export"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview features without writing the dataset"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--timeout-sec", type=int, default=300, help="Worker timeout in seconds (default: 300)"
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Allow export when the requested profile cannot be fully satisfied",
+    )
+    lerobot_export_dataset_parser.add_argument(
+        "--missing-policy",
+        choices=["error", "drop-frame", "fill-last", "nan"],
+        default="nan",
+        help="How to handle missing physical telemetry values (default: nan)",
+    )
+    lerobot_export_dataset_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_validate_dataset_parser = lerobot_subparsers.add_parser(
+        "validate-dataset", help="Validate an existing LeRobotDataset"
+    )
+    lerobot_validate_dataset_parser.add_argument(
+        "--dataset", required=True, help="Path to the LeRobotDataset directory"
+    )
+    lerobot_validate_dataset_parser.add_argument("--repo-id", required=True, help="Dataset repo id")
+    lerobot_validate_dataset_parser.add_argument(
+        "--level",
+        choices=["structural", "load", "dataloader", "rich"],
+        default="load",
+        help="Validation level (default: load)",
+    )
+    lerobot_validate_dataset_parser.add_argument(
+        "--timeout-sec", type=int, default=300, help="Worker timeout in seconds (default: 300)"
+    )
+    lerobot_validate_dataset_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON"
+    )
+
+    lerobot_dataset_api_parser = lerobot_subparsers.add_parser(
+        "dataset-api", help="Introspect the LeRobotDataset API in the configured runtime"
+    )
+    lerobot_dataset_api_parser.add_argument(
+        "--timeout-sec", type=int, default=120, help="Worker timeout in seconds (default: 120)"
+    )
+    lerobot_dataset_api_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_smoke_dataloader_parser = lerobot_subparsers.add_parser(
+        "smoke-dataloader", help="Run a DataLoader smoke test on a LeRobotDataset"
+    )
+    lerobot_smoke_dataloader_parser.add_argument(
+        "--dataset", required=True, help="Path to the LeRobotDataset directory"
+    )
+    lerobot_smoke_dataloader_parser.add_argument("--repo-id", required=True, help="Dataset repo id")
+    lerobot_smoke_dataloader_parser.add_argument(
+        "--batch-size", type=int, default=2, help="DataLoader batch size (default: 2)"
+    )
+    lerobot_smoke_dataloader_parser.add_argument(
+        "--num-workers", type=int, default=0, help="DataLoader workers (default: 0)"
+    )
+    lerobot_smoke_dataloader_parser.add_argument(
+        "--timeout-sec", type=int, default=300, help="Worker timeout in seconds (default: 300)"
+    )
+    lerobot_smoke_dataloader_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON"
+    )
+
+    lerobot_dataset_compatibility_parser = lerobot_subparsers.add_parser(
+        "dataset-compatibility", help="Show ROSClaw × LeRobot dataset feature compatibility matrix"
+    )
+    lerobot_dataset_compatibility_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON"
+    )
+
+    # policy runtime subcommand
+    lerobot_policy_parser = lerobot_subparsers.add_parser(
+        "policy", help="Persistent LeRobot policy runtime commands"
+    )
+    lerobot_policy_subparsers = lerobot_policy_parser.add_subparsers(dest="lerobot_policy_command")
+
+    lerobot_policy_serve_parser = lerobot_policy_subparsers.add_parser(
+        "serve", help="Start the persistent policy runtime"
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--policy.path", dest="policy_path", default=None, help="Policy directory or HF repo id"
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--python", default=None, help="LeRobot Python executable"
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--device", default="cpu", help="Device for inference (default: cpu)"
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Model dtype (default: auto)",
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--allow-network", action="store_true", help="Allow network access for HF downloads"
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--timeout-sec", type=int, default=120, help="Call timeout in seconds (default: 120)"
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--startup-timeout-sec",
+        type=int,
+        default=60,
+        help="Startup timeout in seconds (default: 60)",
+    )
+    lerobot_policy_serve_parser.add_argument(
+        "--daemon", action="store_true", help="Run as a background daemon"
+    )
+
+    lerobot_policy_status_parser = lerobot_policy_subparsers.add_parser(
+        "status", help="Show persistent policy runtime status"
+    )
+    lerobot_policy_status_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_policy_health_parser = lerobot_policy_subparsers.add_parser(
+        "health", help="Check persistent policy runtime health"
+    )
+    lerobot_policy_health_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_policy_stop_parser = lerobot_policy_subparsers.add_parser(
+        "stop", help="Stop the persistent policy runtime"
+    )
+    lerobot_policy_stop_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_policy_metrics_parser = lerobot_policy_subparsers.add_parser(
+        "metrics", help="Show persistent policy runtime metrics"
+    )
+    lerobot_policy_metrics_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_policy_plugins_parser = lerobot_policy_subparsers.add_parser(
+        "plugins", help="List persistent policy runtime plugin info"
+    )
+    lerobot_policy_plugins_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_policy_warmup_parser = lerobot_policy_subparsers.add_parser(
+        "warmup", help="Load a policy and warm up the runtime"
+    )
+    lerobot_policy_warmup_parser.add_argument(
+        "--policy.path", dest="policy_path", required=True, help="Policy directory or HF repo id"
+    )
+    lerobot_policy_warmup_parser.add_argument(
+        "--observation",
+        dest="observation_fixture",
+        help="Path to a JSON observation fixture used for warmup inference",
+    )
+    lerobot_policy_warmup_parser.add_argument("--revision", default="main", help="HF revision")
+    lerobot_policy_warmup_parser.add_argument(
+        "--device", default="cpu", help="Device for inference (default: cpu)"
+    )
+    lerobot_policy_warmup_parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Model dtype (default: auto)",
+    )
+    lerobot_policy_warmup_parser.add_argument(
+        "--allow-network", action="store_true", help="Allow network access for HF downloads"
+    )
+    lerobot_policy_warmup_parser.add_argument(
+        "--timeout-sec", type=int, default=300, help="Call timeout in seconds (default: 300)"
+    )
+    lerobot_policy_warmup_parser.add_argument(
+        "--startup-timeout-sec",
+        type=int,
+        default=60,
+        help="Startup timeout in seconds (default: 60)",
+    )
+    lerobot_policy_warmup_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # body action mapping subcommand
+    lerobot_mapping_parser = lerobot_subparsers.add_parser(
+        "mapping", help="Body action mapping commands"
+    )
+    lerobot_mapping_subparsers = lerobot_mapping_parser.add_subparsers(
+        dest="lerobot_mapping_command"
+    )
+
+    def _add_mapping_common_args(parser):
+        parser.add_argument(
+            "--body", dest="body_id", default="current", help="Body instance ID (default: current)"
+        )
+        parser.add_argument(
+            "--representation",
+            default="joint_position",
+            choices=["joint_position", "joint_velocity", "joint_torque"],
+            help="Action representation (default: joint_position)",
+        )
+        parser.add_argument("--names", required=True, help="Comma-separated policy action names")
+        parser.add_argument("--units", default="", help="Comma-separated policy action units")
+        parser.add_argument("--reference-frame", default="", help="Policy reference frame")
+        parser.add_argument("--allow-partial", action="store_true", help="Allow partial mappings")
+        parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_mapping_generate_parser = lerobot_mapping_subparsers.add_parser(
+        "generate", help="Generate a body action mapping"
+    )
+    _add_mapping_common_args(lerobot_mapping_generate_parser)
+
+    lerobot_mapping_validate_parser = lerobot_mapping_subparsers.add_parser(
+        "validate", help="Validate a body action mapping"
+    )
+    _add_mapping_common_args(lerobot_mapping_validate_parser)
+
+    lerobot_mapping_map_action_parser = lerobot_mapping_subparsers.add_parser(
+        "map-action", help="Map a policy action vector to body joints"
+    )
+    _add_mapping_common_args(lerobot_mapping_map_action_parser)
+    lerobot_mapping_map_action_parser.add_argument(
+        "--values", required=True, help="Comma-separated policy action values"
+    )
+    lerobot_mapping_map_action_parser.add_argument(
+        "--chunk-size", type=int, default=None, help="Action chunk size"
+    )
+
+    # rollout subcommand (proposal-only / shadow)
+    lerobot_rollout_parser = lerobot_subparsers.add_parser(
+        "rollout", help="LeRobot policy rollout loops"
+    )
+    lerobot_rollout_subparsers = lerobot_rollout_parser.add_subparsers(
+        dest="lerobot_rollout_command"
+    )
+
+    def _add_rollout_common_args(parser):
+        parser.add_argument(
+            "--policy.path",
+            dest="policy_path",
+            required=True,
+            help="Policy directory or HF repo id",
+        )
+        parser.add_argument("--revision", default="main", help="HF revision")
+        parser.add_argument("--python", default=None, help="LeRobot Python executable")
+        parser.add_argument("--device", default="cpu", help="Device for inference (default: cpu)")
+        parser.add_argument(
+            "--dtype", default="auto", choices=["auto", "fp32", "fp16", "bf16"], help="Model dtype"
+        )
+        parser.add_argument(
+            "--allow-network", action="store_true", help="Allow network access for HF downloads"
+        )
+        parser.add_argument("--body", dest="body_id", default="current", help="Body instance ID")
+        parser.add_argument("--steps", type=int, default=None, help="Maximum number of steps")
+        parser.add_argument(
+            "--duration", type=float, default=None, help="Maximum duration in seconds"
+        )
+        parser.add_argument("--control-hz", type=float, default=10.0, help="Target control rate")
+        parser.add_argument(
+            "--strict-deadline",
+            action="store_true",
+            help="Stop the rollout if deadline misses exceed the threshold",
+        )
+        parser.add_argument(
+            "--max-deadline-misses",
+            type=int,
+            default=None,
+            help="Maximum allowed deadline misses in strict mode",
+        )
+        parser.add_argument(
+            "--observation-fixture", default=None, help="JSON observation fixture (proposal-only)"
+        )
+        parser.add_argument(
+            "--observation-contract", default=None, help="JSON observation contract file"
+        )
+        parser.add_argument("--trace-path", default=None, help="Output JSONL trace path")
+        parser.add_argument(
+            "--practice-root",
+            default=None,
+            help="Root directory for full Practice session import",
+        )
+        parser.add_argument("--task-id", default=None, help="Task ID for practice events")
+        parser.add_argument(
+            "--allow-partial-mapping", action="store_true", help="Allow partial body mappings"
+        )
+        parser.add_argument("--skip-sandbox", action="store_true", help="Skip sandbox preflight")
+        parser.add_argument("--execute", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--timeout-sec", type=int, default=300, help="Call timeout")
+        parser.add_argument("--startup-timeout-sec", type=int, default=60, help="Startup timeout")
+        parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    lerobot_rollout_proposal_parser = lerobot_rollout_subparsers.add_parser(
+        "proposal-only", help="Rollout over a historical observation fixture"
+    )
+    _add_rollout_common_args(lerobot_rollout_proposal_parser)
+
+    lerobot_rollout_shadow_parser = lerobot_rollout_subparsers.add_parser(
+        "shadow", help="Shadow rollout using live body observations"
+    )
+    _add_rollout_common_args(lerobot_rollout_shadow_parser)
+    lerobot_rollout_shadow_parser.add_argument(
+        "--collector", default="mock", help="Sense collector (default: mock)"
+    )
+    lerobot_rollout_shadow_parser.add_argument(
+        "--scenario", default="normal", help="Mock collector scenario"
+    )
+
+    # P5 RH56 subcommands: rh56-shadow / preflight / arm / execute
+    def _add_rh56_args(parser, *, with_policy: bool = True):
+        from rosclaw.body.rh56.resources import (
+            rh56_config_path,
+            rh56_reference_policy_path,
+        )
+
+        if with_policy:
+            parser.add_argument(
+                "--policy.path",
+                dest="policy_path",
+                default=str(rh56_reference_policy_path()),
+                help="Policy directory (default: bundled RH56 reference policy)",
+            )
+        parser.add_argument("--body-id", default="rh56_right_01", help="Body instance ID")
+        parser.add_argument(
+            "--transport-profile",
+            default=str(rh56_config_path("rh56_right_rs485_v1.yaml")),
+            help="RH56 transport profile YAML",
+        )
+        parser.add_argument(
+            "--calibration",
+            default=str(rh56_config_path("rh56_right_01_calibration.yaml")),
+            help="RH56 calibration YAML",
+        )
+        parser.add_argument("--task", default="hold_current", help="Reference task name")
+        parser.add_argument("--python", default=None, help="LeRobot Python executable")
+        parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    rh56_shadow_parser = lerobot_rollout_subparsers.add_parser(
+        "rh56-shadow", help="P5-B RH56 shadow gate (explicit fixture in this release)"
+    )
+    _add_rh56_args(rh56_shadow_parser)
+    rh56_shadow_parser.add_argument("--steps", type=int, default=1000)
+    rh56_shadow_parser.add_argument("--control-hz", type=float, default=5.0)
+    rh56_shadow_parser.add_argument("--strict-deadline", action="store_true")
+    rh56_shadow_parser.add_argument("--max-deadline-misses", type=int, default=10)
+    rh56_shadow_parser.add_argument("--practice-root", default=None)
+    rh56_shadow_parser.add_argument("--report", default=None, help="Write shadow report MD")
+    rh56_shadow_parser.add_argument(
+        "--fixture",
+        action="store_true",
+        help="Explicitly use synthetic MockModbusTransport feedback",
+    )
+
+    preflight_parser = lerobot_rollout_subparsers.add_parser(
+        "preflight", help="P5 RH56 preflight checks (transport/calibration/contract)"
+    )
+    _add_rh56_args(preflight_parser)
+    preflight_parser.add_argument("--provider-ref", default=None)
+    preflight_parser.add_argument("--mapping", default=None, help="Mapping manifest path")
+
+    arm_parser = lerobot_rollout_subparsers.add_parser(
+        "arm", help="P5 RH56 fixture arming (REAL requires Runtime ActionGateway)"
+    )
+    _add_rh56_args(arm_parser)
+    arm_parser.add_argument("--max-step-delta", type=float, default=20.0)
+    arm_parser.add_argument("--max-speed", type=int, default=100)
+    arm_parser.add_argument("--max-force", type=float, default=100.0)
+    arm_parser.add_argument("--expires-in", type=float, default=120.0)
+    arm_parser.add_argument(
+        "--require-estop",
+        action="store_true",
+        help="Reserved for the future REAL gateway path; does not authorize execution",
+    )
+    arm_parser.add_argument(
+        "--acknowledge-real-robot-risk",
+        action="store_true",
+        help="Reserved for the future REAL gateway path; does not authorize execution",
+    )
+    arm_parser.add_argument(
+        "--fixture",
+        "--mock",
+        dest="fixture",
+        action="store_true",
+        help="Issue a synthetic fixture permit; --mock is a compatibility alias",
+    )
+
+    execute_parser = lerobot_rollout_subparsers.add_parser(
+        "execute", help="P5 RH56 fixture execution (REAL requires Runtime ActionGateway)"
+    )
+    _add_rh56_args(execute_parser)
+    execute_parser.add_argument("--permit", required=True, help="Permit ID from `arm`")
+    execute_parser.add_argument("--steps", type=int, default=3)
+    execute_parser.add_argument("--control-hz", type=float, default=2.0)
+    execute_parser.add_argument("--max-speed", type=int, default=100)
+    execute_parser.add_argument("--max-force", type=float, default=100.0)
+    execute_parser.add_argument("--practice-root", default=None)
+    execute_parser.add_argument(
+        "--acknowledge-real-robot-risk",
+        action="store_true",
+        help="Reserved for the future REAL gateway path; does not authorize execution",
+    )
+    execute_parser.add_argument(
+        "--fixture",
+        action="store_true",
+        help="Explicitly execute against MockModbusTransport only",
+    )
+
+    # auto subcommand (Self-Evolution Control Plane)
+    auto_parser = subparsers.add_parser("auto", help="Auto self-evolution commands")
+    auto_subparsers = auto_parser.add_subparsers(dest="auto_command")
+    auto_init_parser = auto_subparsers.add_parser("init", help="Initialize an auto task")
+    auto_init_parser.add_argument("--task", required=True, help="Task name")
+    auto_init_parser.add_argument("--robot", default="panda", help="Robot identifier")
+    auto_init_parser.add_argument("--skill", required=True, help="Target skill identifier")
+    auto_init_parser.add_argument("--env", default="maniskill", help="Simulation environment")
+    auto_init_parser.add_argument(
+        "--type",
+        default="skill_tuning",
+        choices=["skill_tuning", "failure_repair"],
+        help="Task type",
+    )
+
+    auto_run_parser = auto_subparsers.add_parser("run", help="Run auto evolution")
+    auto_run_parser.add_argument("--task", required=True, help="Task name")
+    auto_run_parser.add_argument(
+        "--rounds", type=int, default=10, help="Number of evolution rounds"
+    )
+    auto_run_parser.add_argument(
+        "--episodes", type=int, default=None, help="Alias for --rounds (deprecated)"
+    )
+    auto_run_parser.add_argument("--dry-run", action="store_true", help="Dry run mode")
+    auto_run_parser.add_argument("--policy", default="failure_guided", help="Evolution policy")
+
+    auto_status_parser = auto_subparsers.add_parser("status", help="Show auto status")
+    auto_status_parser.add_argument("--task", default=None, help="Task name filter")
+
+    auto_champ_parser = auto_subparsers.add_parser("champion", help="Show current champion")
+    auto_champ_parser.add_argument("--task", required=True, help="Task name")
+
+    auto_deadends_parser = auto_subparsers.add_parser("deadends", help="List dead ends")
+    auto_deadends_parser.add_argument("--task", default=None, help="Task name filter")
+    auto_report_parser = auto_subparsers.add_parser("report", help="Generate evolution report")
+    auto_report_parser.add_argument("--task", required=True, help="Task name")
+    auto_report_parser.add_argument("--output", default="", help="Output file")
+    auto_report_parser.add_argument(
+        "--format", default="md", choices=["md", "json"], help="Report format"
+    )
+
+    # skill subcommand
+    skill_parser = subparsers.add_parser("skill", help="Skill commands")
+    skill_subparsers = skill_parser.add_subparsers(dest="skill_command")
+    skill_subparsers.add_parser("list", help="List available skills")
+
+    skill_check_parser = skill_subparsers.add_parser(
+        "check", help="Check skill availability and body compatibility"
+    )
+    skill_check_parser.add_argument(
+        "skill_id", nargs="?", default=None, help="Skill identifier (e.g., reach, grasp)"
+    )
+    skill_check_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Check all discovered skill manifests against the current body",
+    )
+    skill_check_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    skill_invoke_parser = skill_subparsers.add_parser("invoke", help="Invoke a skill")
+    skill_invoke_parser.add_argument(
+        "skill_id", help="Skill identifier (e.g., realsense_capture_rgbd)"
+    )
+    skill_invoke_parser.add_argument(
+        "input", nargs="?", default="{}", help="Input data (JSON string)"
+    )
+    skill_invoke_parser.add_argument(
+        "--body", dest="body_id", default=None, help="Body instance ID"
+    )
+    skill_invoke_parser.add_argument(
+        "--output", dest="output_dir", default=None, help="Output directory for artifacts"
+    )
+    skill_invoke_parser.add_argument("--workspace", default=None, help="ROSClaw workspace")
+    skill_invoke_parser.add_argument("--trace-id", default=None, help="Trace ID for the invocation")
+    skill_invoke_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # `run` is a backward-compatible alias for `invoke`.
+    skill_subparsers.add_parser(
+        "run",
+        parents=[skill_invoke_parser],
+        add_help=False,
+        help="Run a skill (alias for invoke)",
+    )
+
+    # skill champions subcommand
+    skill_champions_parser = skill_subparsers.add_parser(
+        "champions", help="Skill champion management"
+    )
+    skill_champions_sub = skill_champions_parser.add_subparsers(dest="skill_champions_command")
+    skill_champions_sub.add_parser("list", help="List current champions")
+
+    # skill lineage subcommand
+    skill_lineage_parser = skill_subparsers.add_parser("lineage", help="Show skill lineage")
+    skill_lineage_parser.add_argument("skill_id", help="Skill identifier")
+
+    # skill rollback subcommand
+    skill_rollback_parser = skill_subparsers.add_parser(
+        "rollback", help="Rollback skill to version"
+    )
+    skill_rollback_parser.add_argument("skill_id", help="Skill identifier")
+    skill_rollback_parser.add_argument(
+        "--to", "--to-version", dest="to", required=True, help="Target version to rollback to"
+    )
+
+    # Skill Hub lifecycle commands
+    add_skill_hub_parsers(skill_subparsers)
+
+    # sandbox subcommand
+    sandbox_parser = subparsers.add_parser("sandbox", help="Sandbox commands")
+    sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_command")
+    sandbox_subparsers.add_parser("list-worlds", help="List available sandbox worlds")
+    sandbox_verify_parser = sandbox_subparsers.add_parser(
+        "verify", help="Run a deterministic MuJoCo sandbox verification case"
+    )
+    sandbox_verify_parser.add_argument(
+        "--case",
+        default="ur5e-joint-preview",
+        choices=["ur5e-joint-preview"],
+        help="Verification case to run",
+    )
+    sandbox_verify_parser.add_argument(
+        "--robot",
+        default=None,
+        help="Robot identifier override (default: universal_robots_ur5e)",
+    )
+    sandbox_verify_parser.add_argument("--world", default="empty", help="Sandbox world")
+    sandbox_verify_parser.add_argument("--steps", type=int, default=5, help="MuJoCo steps")
+    sandbox_verify_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    sandbox_validate_parser = sandbox_subparsers.add_parser(
+        "validate", help="Validate robot in sandbox"
+    )
+    sandbox_validate_parser.add_argument("robot_id", help="Robot identifier")
+    sandbox_run_parser = sandbox_subparsers.add_parser("run", help="Run a sandbox episode")
+    sandbox_run_parser.add_argument("--robot", required=True, help="Robot identifier")
+    sandbox_run_parser.add_argument("--world", default="empty", help="Sandbox world")
+    sandbox_run_parser.add_argument("--task", required=True, help="Task name")
+    sandbox_run_parser.add_argument(
+        "--mode",
+        default="simulation",
+        choices=["simulation", "fixture"],
+        help="Execution mode; fixture must be explicitly requested",
+    )
+    sandbox_run_parser.add_argument(
+        "--backend",
+        default="mujoco",
+        choices=["mujoco", "mock", "fixture"],
+        help="Sandbox backend (SIMULATION requires mujoco)",
+    )
+    sandbox_run_parser.add_argument(
+        "--target",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        help="Cartesian reach target in meters",
+    )
+    sandbox_run_parser.add_argument("--steps", type=int, default=1200, help="Maximum MuJoCo steps")
+    sandbox_run_parser.add_argument(
+        "--tolerance", type=float, default=0.008, help="Reach success tolerance in meters"
+    )
+    sandbox_run_parser.add_argument("--seed", type=int, default=0, help="Deterministic seed")
+    sandbox_run_parser.add_argument(
+        "--artifact-dir", default=None, help="Directory for trajectory and receipt artifacts"
+    )
+    sandbox_run_parser.add_argument("--trace-id", default=None, help="Trace ID")
+    sandbox_run_parser.add_argument("--json", action="store_true", help="Output receipt as JSON")
+    sandbox_replay_parser = sandbox_subparsers.add_parser("replay", help="Replay a sandbox episode")
+    sandbox_replay_parser.add_argument("episode_id", nargs="?", help="Legacy episode identifier")
+    sandbox_replay_parser.add_argument("--receipt", help="SimulationReceipt JSON to replay")
+    sandbox_replay_parser.add_argument("--robot", help="Override receipt robot identifier")
+    sandbox_replay_parser.add_argument("--world", help="Override receipt world identifier")
+    sandbox_replay_parser.add_argument("--json", action="store_true", help="Output JSON")
+    sandbox_check_parser = sandbox_subparsers.add_parser(
+        "check", help="Check action safety in sandbox"
+    )
+    sandbox_check_parser.add_argument("--robot", required=True, help="Robot identifier")
+    sandbox_check_parser.add_argument("--action", required=True, help="Action JSON or name")
+    sandbox_check_parser.add_argument("--trace-id", default=None, help="Trace ID")
+    sandbox_check_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    sandbox_generate_config_parser = sandbox_subparsers.add_parser(
+        "generate-config", help="Generate simulation config from the active body"
+    )
+    sandbox_generate_config_parser.add_argument(
+        "--body", default="current", help="Body ID (default: current)"
+    )
+    sandbox_generate_config_parser.add_argument(
+        "--engine", default="mujoco", choices=["mujoco", "isaac"], help="Simulation engine"
+    )
+    sandbox_generate_config_parser.add_argument(
+        "--workspace", default=None, help="ROSClaw workspace"
+    )
+    sandbox_generate_config_parser.add_argument(
+        "--output-dir", default=None, help="Output directory (default: <body>/refs/sandbox)"
+    )
+    sandbox_generate_config_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON"
+    )
+
+    # runtime subcommand
+    runtime_parser = subparsers.add_parser("runtime", help="Runtime backend commands")
+    runtime_subparsers = runtime_parser.add_subparsers(dest="runtime_command")
+    runtime_subparsers.add_parser("backends", help="List available runtime backends")
+    runtime_start_parser = runtime_subparsers.add_parser("start", help="Start the Runtime Kernel")
+    runtime_start_parser.add_argument("--home", default=None, help="ROSClaw workspace home")
+    runtime_subparsers.add_parser("stop", help="Stop the Runtime Kernel")
+    runtime_subparsers.add_parser("status", help="Show Runtime Kernel status")
+    doctor_parser = runtime_subparsers.add_parser("doctor", help="Run runtime health checks")
+    doctor_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # test subcommand (E2E smoke tests)
+    test_parser = subparsers.add_parser("test", help="End-to-end smoke tests")
+    test_subparsers = test_parser.add_subparsers(dest="test_command")
+    test_realsense_parser = test_subparsers.add_parser(
+        "realsense", help="Run RealSense RGB-D E2E smoke test"
+    )
+    test_realsense_parser.add_argument(
+        "--profile", default="realsense-d405", help="Robot profile ID (default: realsense-d405)"
+    )
+    test_realsense_parser.add_argument("--body", default=None, help="Body instance ID")
+    test_realsense_parser.add_argument("--camera", default=None, help="Camera namespace")
+    test_realsense_parser.add_argument(
+        "--init", action="store_true", help="Auto-initialize a body if none is linked"
+    )
+    test_realsense_parser.add_argument(
+        "--output-dir", default=None, help="Output directory for captures"
+    )
+    test_realsense_parser.add_argument("--workspace", default=None, help="ROSClaw workspace")
+
+    # firewall subcommand
+    firewall_parser = subparsers.add_parser("firewall", help="Firewall safety checks")
+    firewall_subparsers = firewall_parser.add_subparsers(dest="firewall_command")
+    firewall_check_parser = firewall_subparsers.add_parser("check", help="Check action safety")
+    firewall_check_parser.add_argument("--robot", required=True, help="Robot identifier")
+    firewall_check_parser.add_argument("--action", required=True, help="Action JSON or name")
+    firewall_check_parser.add_argument("--world", default="empty", help="Sandbox world")
+    firewall_check_parser.add_argument("--trace-id", default=None, help="Trace ID")
+
+    # forge subcommand
+    forge_parser = subparsers.add_parser("forge", help="Forge bundle commands")
+    forge_subparsers = forge_parser.add_subparsers(dest="forge_command")
+    forge_sdk_parser = forge_subparsers.add_parser(
+        "sdk-to-mcp", help="Convert SDK doc to MCP bundle"
+    )
+    forge_sdk_parser.add_argument("--name", required=True, help="Bundle name")
+    forge_sdk_parser.add_argument("--sdk-docs", default="", help="SDK description text")
+    forge_sdk_parser.add_argument("--output", required=True, help="Output directory")
+    forge_validate_parser = forge_subparsers.add_parser("validate", help="Validate a bundle")
+    forge_validate_parser.add_argument("bundle_path", help="Path to bundle directory")
+    forge_install_parser = forge_subparsers.add_parser("install", help="Install a bundle")
+    forge_install_parser.add_argument("bundle_path", help="Path to bundle directory")
+    forge_install_parser.add_argument("--staging", action="store_true", help="Install to staging")
+
+    # memory subcommand
+    memory_parser = subparsers.add_parser("memory", help="Memory commands")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_command")
+    memory_status_parser = memory_subparsers.add_parser("status", help="Show memory status")
+    memory_query_parser = memory_subparsers.add_parser("query", help="Query memory")
+    memory_query_parser.add_argument("query", help="Query text")
+    memory_query_parser.add_argument("--limit", type=int, default=5, help="Max results")
+    memory_query_parser.add_argument(
+        "--demo", action="store_true", help="Include demo/mock episode fallback results"
+    )
+    memory_explain_parser = memory_subparsers.add_parser("explain", help="Explain last failure")
+    memory_explain_parser.add_argument("--task-id", default=None, help="Filter by task ID")
+
+    from rosclaw.memory.v2.cli import extend_legacy_memory_parsers, register_memory_v2_commands
+
+    register_memory_v2_commands(memory_subparsers)
+    extend_legacy_memory_parsers(memory_status_parser, memory_query_parser, memory_explain_parser)
+
+    from rosclaw.memory.v2.regime.cli import register_regime_commands
+
+    register_regime_commands(subparsers)
+
+    memory_ingest_parser = memory_subparsers.add_parser(
+        "ingest", help="Ingest a practice episode into memory"
+    )
+    memory_ingest_parser.add_argument("--episode-id", required=True, help="Episode identifier")
+    _add_practice_data_root_argument(memory_ingest_parser)
+
+    # acceptance subcommand (Evo-RPS hardware self-evolution, PR-EVO-HW-1)
+    from rosclaw.evolution.hardware.cli import (
+        cmd_acceptance_evo_rps_baseline,
+        cmd_acceptance_evo_rps_canary,
+        cmd_acceptance_evo_rps_distill,
+        cmd_acceptance_evo_rps_prepare,
+        cmd_acceptance_evo_rps_promote,
+        cmd_acceptance_evo_rps_propose,
+        cmd_acceptance_evo_rps_recurrence,
+        cmd_acceptance_evo_rps_report,
+        cmd_acceptance_evo_rps_validate,
+    )
+
+    acceptance_parser = subparsers.add_parser(
+        "acceptance", help="Hardware acceptance experiments (Evo-RPS)"
+    )
+    acceptance_subparsers = acceptance_parser.add_subparsers(dest="acceptance_command")
+    evo_rps_parser = acceptance_subparsers.add_parser(
+        "evo-rps", help="Evo-RPS self-evolution acceptance"
+    )
+    evo_rps_subparsers = evo_rps_parser.add_subparsers(dest="evo_rps_phase")
+
+    def _evo_rps_phase(name: str, handler, help_text: str) -> None:
+        phase_parser = evo_rps_subparsers.add_parser(name, help=help_text)
+        phase_parser.add_argument("--config", default=None, help="Experiment contract YAML")
+        phase_parser.set_defaults(func=handler)
+
+    _evo_rps_phase(
+        "prepare", cmd_acceptance_evo_rps_prepare, "Provision namespace + preflight gates"
+    )
+    evo_rps_subparsers.choices["prepare"].add_argument(
+        "--dev-allow-mock",
+        action="store_true",
+        help="Harness development only: disclosed mock camera (never acceptance)",
+    )
+    baseline_phase = evo_rps_subparsers.add_parser("baseline", help="Run baseline sessions")
+    baseline_phase.add_argument("--config", default=None, help="Experiment contract YAML")
+    baseline_phase.add_argument("--sessions", type=int, default=3)
+    baseline_phase.add_argument("--rounds", type=int, default=40)
+    baseline_phase.add_argument("--seed-start", type=int, default=0)
+    baseline_phase.set_defaults(func=cmd_acceptance_evo_rps_baseline)
+    _evo_rps_phase("report", cmd_acceptance_evo_rps_report, "Build the evidence report")
+    _evo_rps_phase(
+        "distill", cmd_acceptance_evo_rps_distill, "Distill baseline sessions into the namespace"
+    )
+    propose_phase = evo_rps_subparsers.add_parser(
+        "propose", help="Generate bounded candidates (AUTO v1)"
+    )
+    propose_phase.add_argument("--config", default=None)
+    propose_phase.add_argument("--max-candidates", type=int, default=8)
+    propose_phase.set_defaults(func=cmd_acceptance_evo_rps_propose)
+    validate_phase = evo_rps_subparsers.add_parser(
+        "validate", help="Run the full candidate gate pipeline (L1/L2 sandbox)"
+    )
+    validate_phase.add_argument("--config", default=None)
+    validate_phase.add_argument("--shadow-rounds", type=int, default=12)
+    validate_phase.set_defaults(func=cmd_acceptance_evo_rps_validate)
+    canary_phase = evo_rps_subparsers.add_parser(
+        "canary", help="A/B/C real-machine canary (interleaved arms)"
+    )
+    canary_phase.add_argument("--config", default=None)
+    canary_phase.add_argument("--blocks", type=int, default=3)
+    canary_phase.add_argument("--rounds", type=int, default=40)
+    canary_phase.set_defaults(func=cmd_acceptance_evo_rps_canary)
+    _evo_rps_phase(
+        "promote", cmd_acceptance_evo_rps_promote, "Evaluate the promotion gate (Phase 7)"
+    )
+    recurrence_phase = evo_rps_subparsers.add_parser(
+        "recurrence", help="Phase 8: auto-apply the promoted rule on recurrence"
+    )
+    recurrence_phase.add_argument("--config", default=None)
+    recurrence_phase.add_argument("--rounds", type=int, default=40)
+    recurrence_phase.set_defaults(func=cmd_acceptance_evo_rps_recurrence)
+
+    # darwin subcommand
+    darwin_parser = subparsers.add_parser("darwin", help="Darwin benchmark engine")
+    darwin_subparsers = darwin_parser.add_subparsers(dest="darwin_command")
+
+    darwin_run_parser = darwin_subparsers.add_parser("run", help="Run a Darwin benchmark")
+    darwin_run_parser.add_argument("--task-id", required=True, help="Task identifier")
+    darwin_run_parser.add_argument("--skill-id", required=True, help="Skill identifier")
+    darwin_run_parser.add_argument(
+        "--candidate-skill-id", default=None, help="Candidate skill identifier"
+    )
+    darwin_run_parser.add_argument("--scenario-id", default=None, help="Stress scenario identifier")
+    darwin_run_parser.add_argument("--seeds", type=int, default=10, help="Number of seeds")
+    darwin_run_parser.add_argument("--episodes", type=int, default=50, help="Episodes per seed")
+    darwin_run_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    darwin_list_scenarios_parser = darwin_subparsers.add_parser(
+        "list-scenarios", help="List available stress scenarios"
+    )
+    darwin_list_scenarios_parser.add_argument(
+        "--task-family", default=None, help="Filter by task family"
+    )
+    darwin_list_scenarios_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    darwin_history_parser = darwin_subparsers.add_parser(
+        "history", help="Show local benchmark history"
+    )
+    darwin_history_parser.add_argument("--task-id", default=None, help="Filter by task ID")
+    darwin_history_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # practice subcommand
+    practice_parser = subparsers.add_parser("practice", help="Practice episode commands")
+    practice_subparsers = practice_parser.add_subparsers(dest="practice_command")
+
+    practice_list_parser = practice_subparsers.add_parser(
+        "list", help="List recorded practice sessions"
+    )
+    _add_practice_data_root_argument(practice_list_parser)
+
+    practice_init_parser = practice_subparsers.add_parser(
+        "init", help="Initialize practice configuration"
+    )
+    practice_init_parser.add_argument("--robot", required=True, help="Robot identifier")
+
+    practice_record_parser = practice_subparsers.add_parser(
+        "record", help="Record a practice session from a JSON fixture"
+    )
+    practice_record_parser.add_argument("--fixture", required=True, help="Path to a JSON fixture")
+    practice_record_parser.add_argument(
+        "--out", default=None, help="Practice data root for generated artifacts"
+    )
+    practice_record_parser.add_argument("--data-root", default=None, help="Alias for --out")
+    practice_record_parser.add_argument(
+        "--json", action="store_true", help="Output summary as JSON"
+    )
+
+    practice_start_parser = practice_subparsers.add_parser("start", help="Start a practice session")
+    practice_start_parser.add_argument("--robot", required=True, help="Robot identifier")
+    practice_start_parser.add_argument("--robot-type", default=None, help="Robot type")
+    practice_start_parser.add_argument("--task", default=None, help="Task name / task_id")
+    practice_start_parser.add_argument("--skill", default=None, help="Skill identifier")
+    practice_start_parser.add_argument(
+        "--provider", default=None, help="Provider identifier (optional)"
+    )
+    practice_start_parser.add_argument(
+        "--capability", default="vlm.risk_assessment", help="Provider capability"
+    )
+    practice_start_parser.add_argument(
+        "--sources",
+        default="agent,runtime",
+        help="Comma-separated source list (e.g. agent,runtime,dds)",
+    )
+    practice_start_parser.add_argument("--mock", action="store_true", help="Use mock adapters")
+    practice_start_parser.add_argument("--duration", default=None, help="Duration like 5s, 2m, 1h")
+    practice_start_parser.add_argument(
+        "--sample-hz",
+        type=float,
+        default=1.0,
+        help="Capture frequency when camera source is enabled",
+    )
+    practice_start_parser.add_argument("--seekdb", action="store_true", help="Enable SeekDB commit")
+    _add_practice_data_root_argument(practice_start_parser)
+
+    practice_run_parser = practice_subparsers.add_parser(
+        "run", help="Run a single skill+provider practice episode"
+    )
+    practice_run_parser.add_argument("--robot", required=True, help="Robot/body identifier")
+    practice_run_parser.add_argument("--robot-type", default=None, help="Robot type")
+    practice_run_parser.add_argument("--task", default=None, help="Task name / task_id")
+    practice_run_parser.add_argument("--skill", required=True, help="Skill identifier")
+    practice_run_parser.add_argument(
+        "--provider", default=None, help="Provider identifier (optional)"
+    )
+    practice_run_parser.add_argument(
+        "--capability", default="vlm.risk_assessment", help="Provider capability"
+    )
+    practice_run_parser.add_argument(
+        "--output-root", default=None, help="Episode output root directory"
+    )
+    practice_run_parser.add_argument("--data-root", default=None, help="Alias for --output-root")
+    practice_run_parser.add_argument("--workspace", default=None, help="ROSClaw workspace path")
+    practice_run_parser.add_argument("--json", action="store_true", help="Output summary as JSON")
+
+    practice_validate_parser = practice_subparsers.add_parser(
+        "validate", help="Validate a recorded practice episode"
+    )
+    practice_validate_parser.add_argument("episode_id", help="Episode or practice identifier")
+    _add_practice_data_root_argument(practice_validate_parser)
+    practice_validate_parser.add_argument(
+        "--strict", action="store_true", help="Require camera, provider, and sandbox events"
+    )
+    practice_validate_parser.add_argument(
+        "--json", action="store_true", help="Output validation report as JSON"
+    )
+
+    practice_verify_parser = practice_subparsers.add_parser(
+        "verify", help="Verify closed-loop integrity of a practice session"
+    )
+    practice_verify_parser.add_argument("practice_id", help="Practice session identifier")
+    _add_practice_data_root_argument(practice_verify_parser)
+    practice_verify_parser.add_argument(
+        "--strict", action="store_true", help="Treat warnings as failures"
+    )
+    practice_verify_parser.add_argument(
+        "--json", action="store_true", help="Output verification report as JSON"
+    )
+
+    practice_distill_parser = practice_subparsers.add_parser(
+        "distill", help="Distill raw practice events into knowledge artifacts"
+    )
+    practice_distill_parser.add_argument("practice_id", help="Practice session identifier")
+    _add_practice_data_root_argument(practice_distill_parser)
+    practice_distill_parser.add_argument(
+        "--body-id", default=None, help="Override body_id for distilled cognition"
+    )
+    practice_distill_parser.add_argument(
+        "--no-artifacts", action="store_true", help="Return result without writing artifact files"
+    )
+    practice_distill_parser.add_argument(
+        "--json", action="store_true", help="Output distillation result as JSON"
+    )
+
+    def add_practice_seekdb_backend_args(command_parser: argparse.ArgumentParser) -> None:
+        backend_group = command_parser.add_mutually_exclusive_group()
+        backend_group.add_argument(
+            "--seekdb-path",
+            default=None,
+            help="Path to a local SeekDB SQLite file (default: rosclaw home)",
+        )
+        backend_group.add_argument(
+            "--seekdb-url",
+            default=None,
+            help=(
+                "SeekDB backend DSN: seekdb+native://root@127.0.0.1:2881/rosclaw "
+                "(real SeekDB/OceanBase server, native protocol) or "
+                "mysql://root@127.0.0.1:2881/rosclaw (experimental MySQL protocol)"
+            ),
+        )
+
+    practice_ingest_seekdb_parser = practice_subparsers.add_parser(
+        "ingest-seekdb", help="Ingest a distilled practice session into SeekDB"
+    )
+    practice_ingest_seekdb_parser.add_argument("practice_id", help="Practice session identifier")
+    _add_practice_data_root_argument(practice_ingest_seekdb_parser)
+    add_practice_seekdb_backend_args(practice_ingest_seekdb_parser)
+    practice_ingest_seekdb_parser.add_argument(
+        "--json", action="store_true", help="Output ingestion report as JSON"
+    )
+
+    practice_query_parser = practice_subparsers.add_parser(
+        "query", help="Query practice episodes, failures, and distilled knowledge"
+    )
+    query_subparsers = practice_query_parser.add_subparsers(dest="query_command")
+
+    query_episodes_parser = query_subparsers.add_parser("episodes", help="List practice episodes")
+    query_episodes_parser.add_argument("--body-id", default=None, help="Filter by body_id")
+    query_episodes_parser.add_argument("--skill-id", default=None, help="Filter by skill_id")
+    query_episodes_parser.add_argument("--outcome", default=None, help="Filter by outcome")
+    query_episodes_parser.add_argument("--limit", type=int, default=100, help="Max results")
+    _add_practice_data_root_argument(query_episodes_parser)
+    add_practice_seekdb_backend_args(query_episodes_parser)
+    query_episodes_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_failures_parser = query_subparsers.add_parser(
+        "failures", help="List distilled failure records"
+    )
+    query_failures_parser.add_argument("--body-id", default=None, help="Filter by body_id")
+    query_failures_parser.add_argument(
+        "--failure-type", default=None, help="Filter by failure_type"
+    )
+    query_failures_parser.add_argument("--robot-id", default=None, help="Filter by robot_id")
+    query_failures_parser.add_argument("--limit", type=int, default=100, help="Max results")
+    _add_practice_data_root_argument(query_failures_parser)
+    add_practice_seekdb_backend_args(query_failures_parser)
+    query_failures_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_body_cognition_parser = query_subparsers.add_parser(
+        "body-cognition", help="List distilled body cognition records"
+    )
+    query_body_cognition_parser.add_argument("--body-id", default=None, help="Filter by body_id")
+    query_body_cognition_parser.add_argument(
+        "--cognition-type", default=None, help="Filter by cognition_type"
+    )
+    query_body_cognition_parser.add_argument("--limit", type=int, default=100, help="Max results")
+    _add_practice_data_root_argument(query_body_cognition_parser)
+    add_practice_seekdb_backend_args(query_body_cognition_parser)
+    query_body_cognition_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_sim2real_parser = query_subparsers.add_parser(
+        "sim2real", help="List sim2real delta records"
+    )
+    query_sim2real_parser.add_argument("--body-id", default=None, help="Filter by body_id")
+    query_sim2real_parser.add_argument("--limit", type=int, default=100, help="Max results")
+    _add_practice_data_root_argument(query_sim2real_parser)
+    add_practice_seekdb_backend_args(query_sim2real_parser)
+    query_sim2real_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_candidates_parser = query_subparsers.add_parser(
+        "candidates", help="List candidate policy records"
+    )
+    query_candidates_parser.add_argument("--skill-id", default=None, help="Filter by skill_id")
+    query_candidates_parser.add_argument("--status", default=None, help="Filter by status")
+    query_candidates_parser.add_argument("--policy-id", default=None, help="Filter by policy_id")
+    query_candidates_parser.add_argument("--limit", type=int, default=100, help="Max results")
+    _add_practice_data_root_argument(query_candidates_parser)
+    add_practice_seekdb_backend_args(query_candidates_parser)
+    query_candidates_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_interventions_parser = query_subparsers.add_parser(
+        "interventions", help="List how-intervention records"
+    )
+    query_interventions_parser.add_argument(
+        "--failure-type", default=None, help="Filter by linked failure type"
+    )
+    query_interventions_parser.add_argument(
+        "--failure-id", default=None, help="Filter by failure_id"
+    )
+    query_interventions_parser.add_argument("--outcome", default=None, help="Filter by outcome")
+    query_interventions_parser.add_argument("--limit", type=int, default=100, help="Max results")
+    _add_practice_data_root_argument(query_interventions_parser)
+    add_practice_seekdb_backend_args(query_interventions_parser)
+    query_interventions_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_explain_episode_parser = query_subparsers.add_parser(
+        "explain-episode", help="Explain everything known about an episode"
+    )
+    query_explain_episode_parser.add_argument("episode_id", help="Episode identifier")
+    _add_practice_data_root_argument(query_explain_episode_parser)
+    add_practice_seekdb_backend_args(query_explain_episode_parser)
+    query_explain_episode_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    query_explain_failure_parser = query_subparsers.add_parser(
+        "explain-failure", help="Explain a failure and its interventions"
+    )
+    query_explain_failure_parser.add_argument("failure_id", help="Failure identifier")
+    _add_practice_data_root_argument(query_explain_failure_parser)
+    add_practice_seekdb_backend_args(query_explain_failure_parser)
+    query_explain_failure_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    practice_stop_parser = practice_subparsers.add_parser(
+        "stop", help="Stop the running practice coordinator"
+    )
+    practice_stop_parser.add_argument(
+        "--practice-id", default=None, help="Practice session identifier"
+    )
+
+    practice_sync_parser = practice_subparsers.add_parser(
+        "sync-fallback", help="Sync fallback JSON files to SeekDB"
+    )
+    practice_sync_parser.add_argument("--seekdb-url", default=None, help="SeekDB base URL")
+    practice_sync_parser.add_argument("--fallback-dir", default=None, help="Fallback directory")
+
+    practice_show_parser = practice_subparsers.add_parser(
+        "show", help="Show episode/practice details"
+    )
+    practice_show_parser.add_argument("episode_id", help="Episode or practice identifier")
+    practice_show_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    _add_practice_data_root_argument(practice_show_parser)
+
+    practice_replay_parser = practice_subparsers.add_parser("replay", help="Replay episode trace")
+    practice_replay_parser.add_argument("episode_id", help="Episode identifier")
+    _add_practice_data_root_argument(practice_replay_parser)
+
+    practice_export_parser = practice_subparsers.add_parser(
+        "export", help="Export episode metadata or practice events"
+    )
+    practice_export_parser.add_argument(
+        "episode_id", nargs="?", default=None, help="Episode or practice identifier"
+    )
+    practice_export_parser.add_argument(
+        "--episode", dest="episode_dir", default=None, help="Alias for episode_id"
+    )
+    practice_export_parser.add_argument(
+        "--practice-id", default=None, help="Practice identifier (for jsonl)"
+    )
+    practice_export_parser.add_argument(
+        "--format",
+        choices=["json", "jsonl", "parquet", "lerobot"],
+        default="json",
+        help="Export format",
+    )
+    practice_export_parser.add_argument(
+        "--output", default=None, help="Output file or directory (default stdout / auto path)"
+    )
+    _add_practice_data_root_argument(practice_export_parser)
+    practice_export_parser.add_argument(
+        "--writer",
+        choices=["real", "skeleton"],
+        default=None,
+        help="LeRobot export mode: real dataset writer or legacy skeleton (default: real if runtime available)",
+    )
+    practice_export_parser.add_argument(
+        "--repo-id",
+        default=None,
+        help="Dataset repo id for real writer (default: local/rosclaw_<episode>)",
+    )
+    practice_export_parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Frames per second for real writer (default: inferred or 10)",
+    )
+    practice_export_parser.add_argument(
+        "--task", default=None, help="Override task text for the exported episode"
+    )
+    practice_export_parser.add_argument(
+        "--robot-id", default=None, help="Override robot id metadata"
+    )
+    practice_export_parser.add_argument(
+        "--body-profile", default=None, help="Override body profile metadata"
+    )
+    practice_export_parser.add_argument(
+        "--use-videos",
+        action="store_true",
+        help="Encode camera frames as MP4 videos (default: images)",
+    )
+    practice_export_parser.add_argument(
+        "--visual-storage-mode",
+        choices=["auto", "images", "videos"],
+        default="auto",
+        help="Visual storage mode (default: auto resolves to images)",
+    )
+    practice_export_parser.add_argument(
+        "--profile",
+        choices=["minimal", "safety", "physical", "safety-rich"],
+        default="minimal",
+        help="ROSClaw feature profile (default: minimal)",
+    )
+    practice_export_parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Allow export when the requested profile cannot be fully satisfied",
+    )
+    practice_export_parser.add_argument(
+        "--missing-policy",
+        choices=["error", "drop-frame", "fill-last", "nan"],
+        default="nan",
+        help="How to handle missing physical telemetry values (default: nan)",
+    )
+    practice_export_parser.add_argument(
+        "--include",
+        dest="include_groups",
+        default=None,
+        help="Comma-separated extra feature groups to include",
+    )
+    practice_export_parser.add_argument(
+        "--include-body-snapshot",
+        action="store_true",
+        help="Copy body YAML snapshot into meta/rosclaw/body_snapshot/",
+    )
+    practice_export_parser.add_argument(
+        "--body-snapshot-mode",
+        choices=["none", "sanitized", "full"],
+        default="sanitized",
+        help="Body snapshot sanitization mode (default: sanitized)",
+    )
+    practice_export_parser.add_argument(
+        "--acknowledge-sensitive-body-data",
+        action="store_true",
+        help="Required when --body-snapshot-mode=full to confirm export of sensitive body data",
+    )
+    practice_export_parser.add_argument(
+        "--dataloader", action="store_true", help="Also run a DataLoader smoke test after export"
+    )
+    practice_export_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview features without writing the dataset"
+    )
+    practice_export_parser.add_argument(
+        "--timeout-sec", type=int, default=300, help="Worker timeout in seconds (default: 300)"
+    )
+    practice_export_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # know subcommand
+    know_parser = subparsers.add_parser("know", help="Knowledge base queries")
+    know_subparsers = know_parser.add_subparsers(dest="know_command")
+
+    know_search_parser = know_subparsers.add_parser("search", help="Search knowledge base")
+    know_search_parser.add_argument("query", help="Search query")
+    know_search_parser.add_argument("--robot-id", default=None, help="Robot identifier for context")
+
+    know_robot_parser = know_subparsers.add_parser("robot", help="Show robot knowledge")
+    know_robot_parser.add_argument("robot_id", help="Robot identifier")
+    know_robot_parser.add_argument("--task", default=None, help="Task to check capability for")
+
+    know_recommend_parser = know_subparsers.add_parser(
+        "recommend", help="Recommend robots for task"
+    )
+    know_recommend_parser.add_argument("task", help="Task description")
+
+    know_compile_parser = know_subparsers.add_parser(
+        "compile", help="Compile a grounded task card from a practice episode"
+    )
+    know_compile_parser.add_argument("task", help="Task description")
+    know_compile_parser.add_argument("--episode-id", required=True, help="Episode identifier")
+    _add_practice_data_root_argument(know_compile_parser)
+    know_compile_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # sense subcommand
+    sense_parser = subparsers.add_parser("sense", help="Body sense and readiness commands")
+    sense_subparsers = sense_parser.add_subparsers(dest="sense_command")
+
+    sense_now_parser = sense_subparsers.add_parser("now", help="Get current BodySense snapshot")
+    sense_now_parser.add_argument("--mock", default="normal", help="Mock scenario")
+    sense_now_parser.add_argument("--robot-id", default="g1_lab_01", help="Robot identifier")
+    sense_now_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    sense_state_parser = sense_subparsers.add_parser("state", help="Show detailed BodyState")
+    sense_state_parser.add_argument("--mock", default="normal", help="Mock scenario")
+    sense_state_parser.add_argument("--robot-id", default="g1_lab_01", help="Robot identifier")
+    sense_state_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    sense_readiness_parser = sense_subparsers.add_parser("readiness", help="Show body readiness")
+    sense_readiness_parser.add_argument("--task", required=True, help="Task/capability name")
+    sense_readiness_parser.add_argument("--mock", default="normal", help="Mock scenario")
+    sense_readiness_parser.add_argument("--robot-id", default="g1_lab_01", help="Robot identifier")
+    sense_readiness_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    sense_watch_parser = sense_subparsers.add_parser("watch", help="Watch body sense stream")
+    sense_watch_parser.add_argument("--mock", default="normal", help="Mock scenario")
+    sense_watch_parser.add_argument("--robot-id", default="g1_lab_01", help="Robot identifier")
+    sense_watch_parser.add_argument("--interval", type=float, default=1.0, help="Poll interval")
+    sense_watch_parser.add_argument("--limit", type=int, default=None, help="Max updates")
+
+    sense_events_parser = sense_subparsers.add_parser("events", help="Show recent body events")
+    sense_events_parser.add_argument("--mock", default="normal", help="Mock scenario")
+    sense_events_parser.add_argument("--robot-id", default="g1_lab_01", help="Robot identifier")
+    sense_events_parser.add_argument("--limit", type=int, default=20, help="Max events")
+    sense_events_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    sense_explain_parser = sense_subparsers.add_parser("explain", help="Explain task block")
+    sense_explain_parser.add_argument("--task", required=True, help="Task/capability name")
+    sense_explain_parser.add_argument("--mock", default="normal", help="Mock scenario")
+    sense_explain_parser.add_argument("--robot-id", default="g1_lab_01", help="Robot identifier")
+
+    # fleet subcommand
+    fleet_parser = subparsers.add_parser("fleet", help="Fleet-wide body operations")
+    fleet_subparsers = fleet_parser.add_subparsers(dest="fleet_command")
+
+    fleet_status_parser = fleet_subparsers.add_parser("status", help="Show fleet status")
+    fleet_status_parser.add_argument("--workspace", default=None, help="ROSClaw workspace")
+    fleet_status_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    fleet_stop_parser = fleet_subparsers.add_parser(
+        "stop", help="Broadcast emergency stop to all bodies"
+    )
+    fleet_stop_parser.add_argument("--workspace", default=None, help="ROSClaw workspace")
+    fleet_stop_parser.add_argument("--reason", default="fleet emergency stop", help="Stop reason")
+
+    # demo subcommand
+    demo_parser = subparsers.add_parser("demo", help="Run demonstration scenarios")
+    demo_subparsers = demo_parser.add_subparsers(dest="demo_command")
+
+    demo_list_parser = demo_subparsers.add_parser("list", help="List official verified demos")
+    demo_list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    demo_run_parser = demo_subparsers.add_parser(
+        "run", help="Run an official evidence-bearing demo"
+    )
+    demo_run_parser.add_argument("demo_id", help="Official demo ID (for example ur5e-reach)")
+    demo_run_parser.add_argument(
+        "--target",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        help="Cartesian target override in meters",
+    )
+    demo_run_parser.add_argument("--steps", type=int, default=1200, help="Maximum MuJoCo steps")
+    demo_run_parser.add_argument(
+        "--tolerance", type=float, default=0.008, help="Reach success tolerance in meters"
+    )
+    demo_run_parser.add_argument("--seed", type=int, default=0, help="Deterministic seed")
+    demo_run_parser.add_argument("--trace-id", default=None, help="Parent trace ID")
+    demo_run_parser.add_argument("--home", default=None, help="ROSCLAW_HOME override")
+    demo_run_parser.add_argument("--json", action="store_true", help="Output receipt JSON")
+
+    demo_pid_parser = demo_subparsers.add_parser("mobile-pid", help="Mobile base PID control demo")
+    demo_pid_parser.add_argument("--robot-id", default="turtlebot", help="Robot identifier")
+    demo_pid_parser.add_argument("--target", type=float, default=1.0, help="Target position (m)")
+    demo_pid_parser.add_argument("--kp", type=float, default=2.0, help="Proportional gain")
+    demo_pid_parser.add_argument("--ki", type=float, default=0.1, help="Integral gain")
+    demo_pid_parser.add_argument("--kd", type=float, default=0.5, help="Derivative gain")
+    demo_pid_parser.add_argument(
+        "--backend", default="mock", choices=["mock", "ros2"], help="Runtime backend"
+    )
+
+    demo_grasp_parser = demo_subparsers.add_parser("tabletop-grasp", help="Tabletop grasp demo")
+    demo_grasp_parser.add_argument("--robot-id", default="ur5e", help="Robot identifier")
+    demo_grasp_parser.add_argument("--object", default="red_cup", help="Object to grasp")
+
+    # bench subcommand
+    bench_parser = subparsers.add_parser("bench", help="Benchmark runtime subsystems")
+    bench_subparsers = bench_parser.add_subparsers(dest="bench_command")
+
+    bench_realsense_parser = bench_subparsers.add_parser(
+        "realsense", help="Benchmark RealSense capture"
+    )
+    bench_realsense_parser.add_argument(
+        "--duration", type=float, default=5.0, help="Capture duration in seconds"
+    )
+    bench_realsense_parser.add_argument(
+        "--output", required=True, help="Output directory for report.json"
+    )
+    bench_realsense_parser.add_argument("--json", action="store_true", help="Output report as JSON")
+
+    # agent (P0 onboarding)
+    agent_parser = subparsers.add_parser("agent", help="Agent onboarding and diagnostics")
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command")
+    _add_agent_install_parser(agent_subparsers)
+    _add_agent_init_parser(agent_subparsers)
+    _add_agent_doctor_parser(agent_subparsers)
+    _add_agent_test_parser(agent_subparsers)
+
+    # mcp (P0 MCP server)
+    mcp_parser = subparsers.add_parser("mcp", help="MCP server commands")
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
+    mcp_serve_parser = mcp_subparsers.add_parser("serve", help="Start the P0 MCP server")
+    mcp_serve_parser.add_argument(
+        "--transport",
+        choices=["stdio", "http", "sse"],
+        default="stdio",
+        help="MCP transport",
+    )
+    mcp_serve_parser.add_argument("--host", default="127.0.0.1", help="HTTP/SSE host")
+    mcp_serve_parser.add_argument("--port", type=int, default=9090, help="HTTP/SSE port")
+    mcp_serve_parser.add_argument("--robot-id", default=None, help="Robot identifier")
+    mcp_serve_parser.add_argument(
+        "--profile", default="default", help="ROSClaw runtime profile name"
+    )
+    mcp_serve_parser.add_argument("--project-root", default=".", help="Project root path")
+    mcp_serve_parser.add_argument(
+        "--project", default=None, dest="project_root", help="Alias for --project-root"
+    )
+    mcp_serve_parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="Logging level",
+    )
+    mcp_serve_parser.set_defaults(func=_cmd_mcp_serve)
+
+    # Hardware MCP onboarding subcommands (install/list/health)
+    add_mcp_subparser(mcp_subparsers)
+
+    # feedback and telemetry
+    add_feedback_subparser(subparsers)
+
+    args = parser.parse_args()
+    with telemetry_command_hook(args):
+        if args.command == "init":
+            return cmd_init(args)
+        elif args.command in ("run", "start"):
+            return cmd_run(args)
+        elif args.command == "status":
+            return cmd_status(args)
+        elif args.command == "explain":
+            return cmd_explain_run(args)
+        elif args.command == "dashboard":
+            return cmd_dashboard(args)
+        elif args.command == "trace":
+            if getattr(args, "trace_command", None):
+                return cmd_trace(args)
+            trace_parser.print_help()
+            return 1
+        elif args.command == "doctor":
+            if getattr(args, "ros", False):
+                return cmd_doctor_ros(args)
+            return cmd_doctor(args)
+        elif args.command == "firstboot":
+            return cmd_firstboot(args)
+        elif args.command == "config":
+            if getattr(args, "config_command", None):
+                return cmd_config(args)
+            config_parser.print_help()
+            return 1
+        elif args.command == "profile":
+            if getattr(args, "profile_command", None):
+                return cmd_profile(args)
+            profile_parser.print_help()
+            return 1
+        elif args.command == "uninstall":
+            return cmd_uninstall(args)
+        elif args.command == "ros":
+            return dispatch_ros_command(args)
+        elif args.command == "body":
+            return dispatch_body_command(args)
+        elif args.command == "eurdf":
+            return dispatch_eurdf_command(args)
+        elif args.command == "logs":
+            return cmd_logs(args)
+        elif args.command == "robot":
+            if args.robot_command in {
+                "discover",
+                "install",
+                "add",
+                "configure",
+                "verify",
+                "status",
+            }:
+                return dispatch_robot_pack_command(args)
+            elif args.robot_command == "list":
+                return cmd_robot_list(args)
+            elif args.robot_command == "inspect":
+                return cmd_robot_inspect(args)
+            elif args.robot_command == "validate":
+                return cmd_robot_validate(args)
+            else:
+                robot_parser.print_help()
+                return 1
+        elif args.command == "app":
+            if getattr(args, "app_command", None):
+                return dispatch_app_command(args)
+            app_parser.print_help()
+            return 1
+        elif args.command == "provider":
+            if args.provider_command == "list":
+                return cmd_provider_list(args)
+            elif args.provider_command == "health":
+                return cmd_provider_health(args)
+            elif args.provider_command == "route":
+                return cmd_provider_route(args)
+            elif args.provider_command == "benchmark":
+                return cmd_provider_benchmark(args)
+            elif args.provider_command == "invoke":
+                return cmd_provider_invoke(args)
+            elif args.provider_command == "inspect":
+                if args.type == "lerobot_policy":
+                    return _dispatch_lerobot_cli("cmd_provider_inspect_lerobot", args)
+                print(f"[ROSClaw] Unknown provider type for inspect: {args.type}", file=sys.stderr)
+                return 1
+            elif args.provider_command == "load-test":
+                if args.type == "lerobot_policy":
+                    return _dispatch_lerobot_cli("cmd_provider_load_test_lerobot", args)
+                print(
+                    f"[ROSClaw] Unknown provider type for load-test: {args.type}", file=sys.stderr
+                )
+                return 1
+            elif args.provider_command == "infer":
+                if args.type == "lerobot_policy":
+                    return _dispatch_lerobot_cli("cmd_provider_infer_lerobot", args)
+                print(f"[ROSClaw] Unknown provider type for infer: {args.type}", file=sys.stderr)
+                return 1
+            elif args.provider_command == "diagnose":
+                return cmd_provider_diagnose(args)
+            else:
+                provider_parser.print_help()
+                return 1
+        elif args.command == "capability":
+            if args.capability_command == "list":
+                _register_lerobot_cli_capabilities()
+                return _dispatch_lerobot_cli(
+                    "cmd_capability_list", args, GLOBAL_INTEGRATION_REGISTRY
+                )
+            else:
+                capability_parser.print_help()
+                return 1
+        elif args.command == "lerobot":
+            if args.lerobot_command == "doctor":
+                return _dispatch_lerobot_cli("cmd_lerobot_doctor", args)
+            elif args.lerobot_command == "info":
+                return _dispatch_lerobot_cli("cmd_lerobot_info", args)
+            elif args.lerobot_command == "capabilities":
+                return _dispatch_lerobot_cli("cmd_lerobot_capabilities", args)
+            elif args.lerobot_command == "smoke-policy":
+                return _dispatch_lerobot_cli("cmd_smoke_policy_lerobot", args)
+            elif args.lerobot_command == "compatibility":
+                return _dispatch_lerobot_cli("cmd_lerobot_compatibility", args)
+            elif args.lerobot_command == "export-dataset":
+                return _dispatch_lerobot_cli("cmd_lerobot_export_dataset", args)
+            elif args.lerobot_command == "validate-dataset":
+                return _dispatch_lerobot_cli("cmd_lerobot_validate_dataset", args)
+            elif args.lerobot_command == "dataset-api":
+                return _dispatch_lerobot_cli("cmd_lerobot_dataset_api", args)
+            elif args.lerobot_command == "smoke-dataloader":
+                return _dispatch_lerobot_cli("cmd_lerobot_smoke_dataloader", args)
+            elif args.lerobot_command == "dataset-compatibility":
+                return _dispatch_lerobot_cli("cmd_lerobot_dataset_compatibility", args)
+            elif args.lerobot_command == "policy":
+                if args.lerobot_policy_command == "serve":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_serve", args)
+                elif args.lerobot_policy_command == "status":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_status", args)
+                elif args.lerobot_policy_command == "health":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_health", args)
+                elif args.lerobot_policy_command == "stop":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_stop", args)
+                elif args.lerobot_policy_command == "metrics":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_metrics", args)
+                elif args.lerobot_policy_command == "plugins":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_plugins", args)
+                elif args.lerobot_policy_command == "warmup":
+                    return _dispatch_lerobot_cli("cmd_lerobot_policy_warmup", args)
+                else:
+                    lerobot_policy_parser.print_help()
+                    return 1
+            elif args.lerobot_command == "mapping":
+                if args.lerobot_mapping_command == "generate":
+                    return _dispatch_lerobot_cli("cmd_lerobot_mapping_generate", args)
+                elif args.lerobot_mapping_command == "validate":
+                    return _dispatch_lerobot_cli("cmd_lerobot_mapping_validate", args)
+                elif args.lerobot_mapping_command == "map-action":
+                    return _dispatch_lerobot_cli("cmd_lerobot_mapping_map_action", args)
+                else:
+                    lerobot_mapping_parser.print_help()
+                    return 1
+            elif args.lerobot_command == "rollout":
+                if args.lerobot_rollout_command == "proposal-only":
+                    return _dispatch_lerobot_cli("cmd_lerobot_rollout_proposal_only", args)
+                elif args.lerobot_rollout_command == "shadow":
+                    return _dispatch_lerobot_cli("cmd_lerobot_rollout_shadow", args)
+                elif args.lerobot_rollout_command == "rh56-shadow":
+                    return _dispatch_lerobot_cli("cmd_lerobot_rollout_rh56_shadow", args)
+                elif args.lerobot_rollout_command == "preflight":
+                    return _dispatch_lerobot_cli("cmd_lerobot_rollout_preflight", args)
+                elif args.lerobot_rollout_command == "arm":
+                    return _dispatch_lerobot_cli("cmd_lerobot_rollout_arm", args)
+                elif args.lerobot_rollout_command == "execute":
+                    return _dispatch_lerobot_cli("cmd_lerobot_rollout_execute", args)
+                else:
+                    lerobot_rollout_parser.print_help()
+                    return 1
+            else:
+                lerobot_parser.print_help()
+                return 1
+        elif args.command == "setup":
+            if args.setup_command == "lerobot":
+                return _dispatch_lerobot_cli("cmd_setup_lerobot", args)
+            else:
+                setup_parser.print_help()
+                return 1
+        elif args.command == "skill":
+            if getattr(args, "func", None):
+                return args.func(args)
+            if args.skill_command == "list":
+                return cmd_skill_list(args)
+            elif args.skill_command == "check":
+                return cmd_skill_check(args)
+            elif args.skill_command in ("invoke", "run"):
+                return cmd_skill_invoke(args)
+            elif args.skill_command == "champions":
+                if args.skill_champions_command == "list":
+                    return cmd_skill_champions_list(args)
+                else:
+                    skill_champions_parser.print_help()
+                    return 1
+            elif args.skill_command == "lineage":
+                return cmd_skill_lineage(args)
+            elif args.skill_command == "rollback":
+                return cmd_skill_rollback(args)
+            else:
+                skill_parser.print_help()
+                return 1
+        elif args.command == "how":
+            how_handler = getattr(args, "how_handler", None)
+            if how_handler is not None:
+                return how_handler(args)
+            if args.how_command == "explain":
+                return cmd_how_explain(args)
+            elif args.how_command == "recover":
+                return cmd_how_recover(args)
+            elif args.how_command == "advise":
+                return cmd_how_advise(args)
+            else:
+                how_parser.print_help()
+                return 1
+        elif args.command == "auto":
+            if args.auto_command == "init":
+                return cmd_auto_init(args)
+            elif args.auto_command == "run":
+                return cmd_auto_run(args)
+            elif args.auto_command == "status":
+                return cmd_auto_status(args)
+            elif args.auto_command == "champion":
+                return cmd_auto_champion(args)
+            elif args.auto_command == "deadends":
+                return cmd_auto_deadends(args)
+            elif args.auto_command == "report":
+                return cmd_auto_report(args)
+            else:
+                auto_parser.print_help()
+                return 1
+        elif args.command == "sandbox":
+            if args.sandbox_command == "list-worlds":
+                return cmd_sandbox_list_worlds(args)
+            elif args.sandbox_command == "verify":
+                return cmd_sandbox_verify(args)
+            elif args.sandbox_command == "validate":
+                return cmd_sandbox_validate(args)
+            elif args.sandbox_command == "generate-config":
+                return cmd_sandbox_generate_config(args)
+            elif args.sandbox_command == "run":
+                return cmd_sandbox_run(args)
+            elif args.sandbox_command == "replay":
+                return cmd_sandbox_replay(args)
+            elif args.sandbox_command == "check":
+                return cmd_sandbox_check(args)
+            else:
+                sandbox_parser.print_help()
+                return 1
+        elif args.command == "firewall":
+            if args.firewall_command == "check":
+                return cmd_firewall_check(args)
+            else:
+                firewall_parser.print_help()
+                return 1
+        elif args.command == "forge":
+            if args.forge_command == "validate":
+                return cmd_forge_validate(args)
+            elif args.forge_command == "install":
+                return cmd_forge_install(args)
+            elif args.forge_command == "sdk-to-mcp":
+                return cmd_forge_sdk_to_mcp(args)
+            else:
+                forge_parser.print_help()
+                return 1
+        elif args.command == "regime":
+            handler = getattr(args, "handler", None)
+            if handler is not None:
+                return handler(args)
+            print("regime requires a subcommand: status|explain|replay|transitions")
+            return 1
+        elif args.command == "memory":
+            v2_handler = getattr(args, "v2_handler", None)
+            if v2_handler is not None and (
+                getattr(args, "v2", False)
+                or args.memory_command
+                in {"active", "verify", "consolidate", "forget", "distill", "index", "benchmark"}
+            ):
+                return v2_handler(args)
+            if args.memory_command == "status":
+                return cmd_memory_status(args)
+            elif args.memory_command == "query":
+                return cmd_memory_query(args)
+            elif args.memory_command == "explain":
+                return cmd_memory_explain(args)
+            elif args.memory_command == "ingest":
+                return cmd_memory_ingest(args)
+            else:
+                memory_parser.print_help()
+                return 1
+        elif args.command == "events":
+            if getattr(args, "events_command", None) == "publish":
+                return cmd_events_publish(args)
+            elif getattr(args, "events_command", None) == "list":
+                return cmd_events_list(args)
+            elif getattr(args, "events_command", None) == "tail" or not args.events_command:
+                return cmd_events_tail(args)
+            else:
+                events_parser.print_help()
+                return 1
+        elif args.command == "runtime":
+            if args.runtime_command == "backends":
+                return cmd_runtime_backends(args)
+            elif args.runtime_command == "doctor":
+                return cmd_runtime_doctor(args)
+            elif args.runtime_command == "start":
+                return cmd_runtime_start(args)
+            elif args.runtime_command == "stop":
+                return cmd_runtime_stop(args)
+            elif args.runtime_command == "status":
+                return cmd_runtime_status(args)
+            else:
+                runtime_parser.print_help()
+                return 1
+        elif args.command == "test":
+            if args.test_command == "realsense":
+                return cmd_test_realsense(args)
+            else:
+                test_parser.print_help()
+                return 1
+        elif args.command == "stop":
+            return cmd_stop(args)
+        elif args.command == "restart":
+            return cmd_restart(args)
+        elif args.command == "darwin":
+            return cmd_darwin(args)
+        elif args.command == "practice":
+            if args.practice_command == "list":
+                return cmd_practice_list(args)
+            elif args.practice_command == "init":
+                return cmd_practice_init(args)
+            elif args.practice_command == "record":
+                return cmd_practice_record(args)
+            elif args.practice_command == "start":
+                return cmd_practice_start(args)
+            elif args.practice_command == "run":
+                return cmd_practice_run(args)
+            elif args.practice_command == "validate":
+                return cmd_practice_validate(args)
+            elif args.practice_command == "verify":
+                return cmd_practice_verify(args)
+            elif args.practice_command == "distill":
+                return cmd_practice_distill(args)
+            elif args.practice_command == "ingest-seekdb":
+                return cmd_practice_ingest_seekdb(args)
+            elif args.practice_command == "query":
+                return cmd_practice_query(args)
+            elif args.practice_command == "stop":
+                return cmd_practice_stop(args)
+            elif args.practice_command == "sync-fallback":
+                return cmd_practice_sync_fallback(args)
+            elif args.practice_command == "show":
+                return cmd_practice_show(args)
+            elif args.practice_command == "replay":
+                return cmd_practice_replay(args)
+            elif args.practice_command == "export":
+                return cmd_practice_export(args)
+            else:
+                practice_parser.print_help()
+                return 1
+        elif args.command == "db":
+            if args.db_command == "status":
+                return cmd_db_status(args)
+            elif args.db_command == "doctor":
+                return cmd_db_doctor(args)
+            elif args.db_command == "reconcile":
+                return cmd_db_reconcile(args)
+            else:
+                db_parser.print_help()
+                return 1
+        elif args.command == "know":
+            if args.know_command == "search":
+                return cmd_know_search(args)
+            elif args.know_command == "robot":
+                return cmd_know_robot(args)
+            elif args.know_command == "recommend":
+                return cmd_know_recommend(args)
+            elif args.know_command == "compile":
+                return cmd_know_compile(args)
+            else:
+                know_parser.print_help()
+                return 1
+        elif args.command == "sense":
+            if args.sense_command == "now":
+                return cmd_sense_now(args)
+            elif args.sense_command == "state":
+                return cmd_sense_state(args)
+            elif args.sense_command == "readiness":
+                return cmd_sense_readiness(args)
+            elif args.sense_command == "watch":
+                return cmd_sense_watch(args)
+            elif args.sense_command == "events":
+                return cmd_sense_events(args)
+            elif args.sense_command == "explain":
+                return cmd_sense_explain(args)
+            else:
+                sense_parser.print_help()
+                return 1
+        elif args.command == "demo":
+            if args.demo_command == "list":
+                return cmd_demo_list(args)
+            elif args.demo_command == "run":
+                return cmd_demo_run(args)
+            elif args.demo_command == "mobile-pid":
+                return cmd_demo_mobile_pid(args)
+            elif args.demo_command == "tabletop-grasp":
+                return cmd_demo_tabletop_grasp(args)
+            else:
+                demo_parser.print_help()
+                return 1
+        elif args.command == "bench":
+            if args.bench_command == "realsense":
+                return cmd_bench_realsense(args)
+            else:
+                bench_parser.print_help()
+                return 1
+        elif args.command == "acceptance":
+            if getattr(args, "func", None):
+                return args.func(args)
+            acceptance_parser.print_help()
+            return 1
+        elif args.command == "hub":
+            return dispatch_hub_command(args)
+        elif args.command == "agent":
+            if getattr(args, "func", None):
+                return args.func(args)
+            agent_parser.print_help()
+            return 1
+        elif args.command == "mcp":
+            if getattr(args, "func", None):
+                return args.func(args)
+            mcp_parser.print_help()
+            return 1
+        elif args.command == "fleet":
+            if args.fleet_command == "status":
+                return cmd_fleet_status(args)
+            elif args.fleet_command == "stop":
+                return cmd_fleet_stop(args)
+            else:
+                fleet_parser.print_help()
+                return 1
+        elif args.command == "feedback":
+            return dispatch_feedback_command(args)
+        else:
+            parser.print_help()
+            return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

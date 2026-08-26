@@ -1,0 +1,99 @@
+--- before/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py
++++ after/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py
+@@ -12,7 +12,7 @@
+ from launch_ros.actions import Node
+ 
+ 
+-WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
++WORKSPACE = Path("/home/hkz/rosclaw_openarm_integration/ros_ws")
+ MOVEIT_CONFIG_SHARE = Path(get_package_share_directory("openarm_moveit_config"))
+ DEFAULT_URDF_PATH = WORKSPACE / "src/openarm_description/output.urdf"
+ SRDF_PATH = MOVEIT_CONFIG_SHARE / "srdf/openarm.srdf"
+--- before/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_limits_20260812_153918
++++ after/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_limits_20260812_153918
+@@ -12,7 +12,7 @@
+ from launch_ros.actions import Node
+ 
+ 
+-WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
++WORKSPACE = Path("/home/hkz/rosclaw_openarm_integration/ros_ws")
+ MOVEIT_CONFIG_SHARE = Path(get_package_share_directory("openarm_moveit_config"))
+ DEFAULT_URDF_PATH = WORKSPACE / "src/openarm_description/output.urdf"
+ SRDF_PATH = MOVEIT_CONFIG_SHARE / "srdf/openarm.srdf"
+--- before/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_axis_fix_20260812_151850
++++ after/ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_axis_fix_20260812_151850
+@@ -12,7 +12,7 @@
+ from launch_ros.actions import Node
+ 
+ 
+-WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
++WORKSPACE = Path("/home/hkz/rosclaw_openarm_integration/ros_ws")
+ MOVEIT_CONFIG_SHARE = Path(get_package_share_directory("openarm_moveit_config"))
+ DEFAULT_URDF_PATH = WORKSPACE / "src/openarm_description/output.urdf"
+ SRDF_PATH = MOVEIT_CONFIG_SHARE / "srdf/openarm.srdf"
+--- before/ros_ws/src/rosclaw_openarm_bringup/config/openarm_sim.yaml
++++ after/ros_ws/src/rosclaw_openarm_bringup/config/openarm_sim.yaml
+@@ -1,7 +1,7 @@
+ mujoco_moveit_bridge:
+   ros__parameters:
+-    model_path: /home/hkz/openarm_rosclaw/models/openarm_dual_mujoco_01/robot.mjcf.xml
+-    srdf_path: /home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf
++    model_path: /home/hkz/rosclaw_openarm_integration/models/openarm_dual_mujoco_01/robot.mjcf.xml
++    srdf_path: /home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf
+     position_gain: 0.15
+     goal_tolerance: 0.003
+     gripper_goal_tolerance: 0.0005
+--- before/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py
++++ after/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py
+@@ -135,11 +135,11 @@
+         super().__init__("mujoco_moveit_bridge")
+ 
+         self.declare_parameter(
+-            "model_path", "/home/hkz/openarm_rosclaw/ros_ws/mujoco_models/mujoco_arm.xml"
++            "model_path", "/home/hkz/rosclaw_openarm_integration/models/openarm_dual_mujoco_01/robot.mjcf.xml"
+         )
+         self.declare_parameter(
+             "srdf_path",
+-            "/home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
++            "/home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
+         )
+         self.declare_parameter("enable_legacy_topic", False)
+         self.declare_parameter("enable_gripper_controllers", False)
+--- before/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py.before_boundary_20260812_160633
++++ after/ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py.before_boundary_20260812_160633
+@@ -119,11 +119,11 @@
+         super().__init__("mujoco_moveit_bridge")
+ 
+         self.declare_parameter(
+-            "model_path", "/home/hkz/openarm_rosclaw/ros_ws/mujoco_models/mujoco_arm.xml"
++            "model_path", "/home/hkz/rosclaw_openarm_integration/ros_ws/mujoco_models/mujoco_arm.xml"
+         )
+         self.declare_parameter(
+             "srdf_path",
+-            "/home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
++            "/home/hkz/rosclaw_openarm_integration/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
+         )
+         self.declare_parameter("enable_legacy_topic", False)
+         self.declare_parameter("enable_gripper_controllers", False)
+--- before/ros_ws/src/rosclaw_openarm_bringup/launch/openarm_pick_demo.launch.py
++++ after/ros_ws/src/rosclaw_openarm_bringup/launch/openarm_pick_demo.launch.py
+@@ -16,7 +16,7 @@
+ def generate_launch_description() -> LaunchDescription:
+     bringup_share = Path(get_package_share_directory("rosclaw_openarm_bringup"))
+     moveit_share = Path(get_package_share_directory("openarm_moveit_config"))
+-    project = Path(os.environ.get("OPENARM_PROJECT_ROOT", "/home/hkz/openarm_rosclaw"))
++    project = Path(os.environ.get("OPENARM_PROJECT_ROOT", "/home/hkz/rosclaw_openarm_integration"))
+     model_path = LaunchConfiguration("model_path")
+     robot_description_path = LaunchConfiguration("robot_description_path")
+     headless = LaunchConfiguration("headless")
+--- before/ros_ws/src/rosclaw_openarm_bringup/launch/openarm_sim.launch.py
++++ after/ros_ws/src/rosclaw_openarm_bringup/launch/openarm_sim.launch.py
+@@ -28,7 +28,7 @@
+ 
+     parameters = str(bringup_share / "config" / "openarm_sim.yaml")
+     project_root = Path(
+-        os.environ.get("OPENARM_PROJECT_ROOT", "/home/hkz/openarm_rosclaw")
++        os.environ.get("OPENARM_PROJECT_ROOT", "/home/hkz/rosclaw_openarm_integration")
+     ).expanduser().resolve()
+     model_path = LaunchConfiguration("model_path")
+     robot_description_path = LaunchConfiguration("robot_description_path")

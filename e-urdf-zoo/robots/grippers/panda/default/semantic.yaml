@@ -1,0 +1,45 @@
+schema_version: e_urdf.semantic.v1
+identity:
+  robot_type: gripper
+frames:
+  root: base_link
+  mounting: mounting
+  tcp: tcp
+groups:
+  base:
+    type: palm
+    links:
+      - base_link
+    joints: []
+    side: null
+    roles:
+      - base
+    source: heuristic
+    confidence: 0.8
+    warnings: []
+  fingers:
+    type: finger_group
+    links:
+      - left_finger
+      - right_finger
+    joints:
+      - finger_joint
+    side: null
+    roles:
+      - grasp
+    source: heuristic
+    confidence: 0.8
+    warnings: []
+contact_surfaces:
+  fingertips:
+    group_type: fingertip
+    links:
+      - left_finger
+      - right_finger
+    source: heuristic
+mounting:
+  compatible_mounts:
+    - panda_flange
+  required_adapter: null
+notes:
+  - Minimal semantic map for test fixtures.

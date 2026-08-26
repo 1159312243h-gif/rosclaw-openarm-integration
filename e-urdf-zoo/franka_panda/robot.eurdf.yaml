@@ -1,0 +1,267 @@
+robot_id: franka_emika_panda
+name: Panda
+vendor: Franka Emika
+version: "4.0"
+description: >
+  Collaborative 7-DOF torque-controlled manipulator with 3kg payload,
+  855mm reach. Features sensitive torque sensors in all 7 joints.
+
+dof: 7
+links:
+  - name: base_link
+    type: base
+    mass: 2.5
+    mesh: "assets/base.dae"
+  - name: link1
+    type: link
+    mass: 4.0
+    mesh: "assets/link1.dae"
+  - name: link2
+    type: link
+    mass: 4.0
+    mesh: "assets/link2.dae"
+  - name: link3
+    type: link
+    mass: 3.0
+    mesh: "assets/link3.dae"
+  - name: link4
+    type: link
+    mass: 2.5
+    mesh: "assets/link4.dae"
+  - name: link5
+    type: link
+    mass: 1.5
+    mesh: "assets/link5.dae"
+  - name: link6
+    type: link
+    mass: 1.2
+    mesh: "assets/link6.dae"
+  - name: link7
+    type: link
+    mass: 0.5
+    mesh: "assets/link7.dae"
+  - name: flange
+    type: end_effector_mount
+    mass: 0.1
+  - name: tcp
+    type: tcp
+    mass: 0.0
+
+joints:
+  - name: panda_joint1
+    type: revolute
+    parent: base_link
+    child: link1
+    axis: [0, 0, 1]
+    limits: {lower: -2.8973, upper: 2.8973, velocity: 2.1750, effort: 87.0}
+  - name: panda_joint2
+    type: revolute
+    parent: link1
+    child: link2
+    axis: [0, 1, 0]
+    limits: {lower: -1.7628, upper: 1.7628, velocity: 2.1750, effort: 87.0}
+  - name: panda_joint3
+    type: revolute
+    parent: link2
+    child: link3
+    axis: [0, 0, 1]
+    limits: {lower: -2.8973, upper: 2.8973, velocity: 2.1750, effort: 87.0}
+  - name: panda_joint4
+    type: revolute
+    parent: link3
+    child: link4
+    axis: [0, 1, 0]
+    limits: {lower: -3.0718, upper: -0.0698, velocity: 2.1750, effort: 87.0}
+  - name: panda_joint5
+    type: revolute
+    parent: link4
+    child: link5
+    axis: [0, 0, 1]
+    limits: {lower: -2.8973, upper: 2.8973, velocity: 2.6100, effort: 12.0}
+  - name: panda_joint6
+    type: revolute
+    parent: link5
+    child: link6
+    axis: [0, 1, 0]
+    limits: {lower: -0.0175, upper: 3.7525, velocity: 2.6100, effort: 12.0}
+  - name: panda_joint7
+    type: revolute
+    parent: link6
+    child: link7
+    axis: [0, 0, 1]
+    limits: {lower: -2.8973, upper: 2.8973, velocity: 2.6100, effort: 12.0}
+
+sensors:
+  - name: joint_torque_sensors
+    type: torque
+    parent_link: "*"
+    resolution: 0.01
+  - name: tcp_force_sensor
+    type: force_torque
+    parent_link: link7
+    frame: tcp
+    range: {force: [0, 200], torque: [0, 10]}
+    noise_std: {force: 0.5, torque: 0.02}
+  - name: hand_camera
+    type: camera
+    parent_link: link7
+    resolution: [1280, 800]
+    fov: 70.0
+    near: 0.01
+    far: 5.0
+    fps: 30
+  - name: base_imu
+    type: imu
+    parent_link: base_link
+    noise_std: {accel: 0.005, gyro: 0.0005}
+
+actuators:
+  - name: panda_motor_1
+    type: electric_motor
+    joint: panda_joint1
+    max_current: 10.0
+    gear_ratio: 100.0
+    control_mode: [position, velocity, torque]
+  - name: panda_motor_2
+    type: electric_motor
+    joint: panda_joint2
+    max_current: 10.0
+    gear_ratio: 100.0
+    control_mode: [position, velocity, torque]
+  - name: panda_motor_3
+    type: electric_motor
+    joint: panda_joint3
+    max_current: 10.0
+    gear_ratio: 100.0
+    control_mode: [position, velocity, torque]
+  - name: panda_motor_4
+    type: electric_motor
+    joint: panda_joint4
+    max_current: 10.0
+    gear_ratio: 100.0
+    control_mode: [position, velocity, torque]
+  - name: panda_motor_5
+    type: electric_motor
+    joint: panda_joint5
+    max_current: 3.0
+    gear_ratio: 50.0
+    control_mode: [position, velocity, torque]
+  - name: panda_motor_6
+    type: electric_motor
+    joint: panda_joint6
+    max_current: 3.0
+    gear_ratio: 50.0
+    control_mode: [position, velocity, torque]
+  - name: panda_motor_7
+    type: electric_motor
+    joint: panda_joint7
+    max_current: 3.0
+    gear_ratio: 50.0
+    control_mode: [position, velocity, torque]
+
+safety_limits:
+  joint_limits:
+    panda_joint1: {lower: -2.8973, upper: 2.8973}
+    panda_joint2: {lower: -1.7628, upper: 1.7628}
+    panda_joint3: {lower: -2.8973, upper: 2.8973}
+    panda_joint4: {lower: -3.0718, upper: -0.0698}
+    panda_joint5: {lower: -2.8973, upper: 2.8973}
+    panda_joint6: {lower: -0.0175, upper: 3.7525}
+    panda_joint7: {lower: -2.8973, upper: 2.8973}
+  velocity_limits:
+    panda_joint1: 2.1750
+    panda_joint2: 2.1750
+    panda_joint3: 2.1750
+    panda_joint4: 2.1750
+    panda_joint5: 2.6100
+    panda_joint6: 2.6100
+    panda_joint7: 2.6100
+  force_limits:
+    max_tcp_force: 200.0
+    max_tcp_torque: 10.0
+    max_joint_effort: 87.0
+  workspace: {type: sphere, center: [0, 0, 0.4], radius: 0.855, height_min: 0.0, height_max: 1.2}
+  power_limits: {max_power: 300.0, max_current_total: 40.0}
+
+capabilities:
+  - name: pick_and_place
+    type: manipulation
+    skill_type: programmed
+    parameters:
+      object: {type: str}
+      location: {type: str}
+      grip_force: {type: float, default: 15.0, unit: N}
+    constraints: {max_payload: 3.0, max_reach: 0.855, requires_gripper: true}
+  - name: insertion
+    type: assembly
+    skill_type: composed
+    parameters:
+      hole_location: {type: str}
+      insertion_depth: {type: float, unit: m}
+      max_force: {type: float, default: 30.0, unit: N}
+    sensors_used: [tcp_force_sensor]
+  - name: hand_guided_teaching
+    type: teaching
+    skill_type: programmed
+    parameters:
+      record_trajectory: {type: bool, default: true}
+      sample_rate: {type: float, default: 1000.0, unit: Hz}
+  - name: peg_in_hole
+    type: assembly
+    skill_type: composed
+    parameters:
+      peg_diameter: {type: float, unit: m}
+      hole_diameter: {type: float, unit: m}
+      max_force: {type: float, default: 20.0, unit: N}
+  - name: drawer_opening
+    type: manipulation
+    skill_type: composed
+    parameters:
+      handle_location: {type: str}
+      pull_distance: {type: float, unit: m}
+      max_force: {type: float, default: 25.0, unit: N}
+
+simulation_backends:
+  mujoco:
+    model_file: robot.mjcf.xml
+    timestep: 0.002
+    integrator: implicitfast
+    solver: newton
+    iterations: 50
+    ls_iterations: 10
+    gravity: [0, 0, -9.81]
+    contact: {friction: [1.0, 0.005, 0.0001], solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.001]}
+  isaac:
+    model_file: robot.urdf
+    stage_units: meters
+    physics_dt: 0.00833
+    rendering_dt: 0.01667
+    gpu_physics: false
+  gazebo:
+    model_file: robot.urdf
+    physics_engine: ode
+    max_step_size: 0.001
+    real_time_factor: 1.0
+
+semantic_tags:
+  - collaborative_robot
+  - research
+  - 7dof
+  - torque_control
+  - force_sensing
+  - pick_and_place
+  - assembly
+  - european
+  - franka_series
+
+metadata:
+  urdf_version: "1.0"
+  ros2_package: franka_description
+  moveit_config_package: panda_moveit_config
+  ros2_controllers:
+    - joint_trajectory_controller
+    - forward_command_controller
+    - effort_controllers/JointGroupEffortController
+  default_controller: effort_controllers/JointGroupEffortController
+  gripper_options: [Franka Hand, Robotiq 2F-85, OnRobot RG2]
+  certification: [CE, ISO_10218_1]

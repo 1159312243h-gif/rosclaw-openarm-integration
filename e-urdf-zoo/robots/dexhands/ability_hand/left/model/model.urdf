@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<robot name="ability_hand_left">
+  <link name="base_link"/>
+  <link name="finger_base"/>
+  <joint name="finger_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="finger_base"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>

@@ -1,0 +1,33 @@
+schema_version: e_urdf.capabilities.v1
+capabilities:
+  - id: open_hand
+    name: Open Hand
+    scope: manipulation
+    risk: low
+    body_parts: []
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors: []
+    required_calibration: []
+    safety_notes: []
+  - id: close_hand_slowly
+    name: Close Hand Slowly
+    scope: manipulation
+    risk: medium
+    body_parts: []
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors:
+      - current_limit_monitor
+    required_calibration: []
+    safety_notes:
+      - Use reduced speed.
+forbidden_capabilities:
+  - id: fast_full_close
+    description: Close all fingers/joints to maximum at high speed
+    reason: Risk of collision and motor overload
+    severity: critical
+    enforcement:
+      policy_block: true
+      sandbox_block: true
+      real_robot_block: true

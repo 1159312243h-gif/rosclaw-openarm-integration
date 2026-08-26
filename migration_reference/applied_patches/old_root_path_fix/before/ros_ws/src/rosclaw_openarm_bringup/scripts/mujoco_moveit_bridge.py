@@ -1,0 +1,1109 @@
+#!/usr/bin/env python3
+"""Dual-arm MuJoCo controller bridge for MoveIt 2 on ROS 2 Jazzy."""
+
+import bisect
+import copy
+import math
+import select
+import sys
+import termios
+import threading
+import time
+import tty
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Any
+
+import mujoco
+import rclpy
+from control_msgs.action import FollowJointTrajectory
+from geometry_msgs.msg import PoseStamped
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from visualization_msgs.msg import Marker
+
+GREEN = "\033[92m"
+CYAN = "\033[96m"
+RED = "\033[91m"
+END = "\033[0m"
+
+LEFT_ARM_JOINTS = tuple(f"openarm_left_joint{index}" for index in range(1, 8))
+RIGHT_ARM_JOINTS = tuple(f"openarm_right_joint{index}" for index in range(1, 8))
+FINGER_JOINTS = (
+    "openarm_left_finger_joint1",
+    "openarm_left_finger_joint2",
+    "openarm_right_finger_joint1",
+    "openarm_right_finger_joint2",
+)
+JOINT_NAMES = LEFT_ARM_JOINTS + FINGER_JOINTS[:2] + RIGHT_ARM_JOINTS + FINGER_JOINTS[2:]
+
+CONTROLLER_JOINTS = {
+    "left_arm_controller": LEFT_ARM_JOINTS,
+    "right_arm_controller": RIGHT_ARM_JOINTS,
+}
+GRIPPER_CONTROLLER_JOINTS = {
+    "left_gripper_controller": ("openarm_left_finger_joint1",),
+    "right_gripper_controller": ("openarm_right_finger_joint1",),
+}
+GRIPPER_ACTUATORS = {
+    "left_gripper_controller": "openarm_left_gripper_position",
+    "right_gripper_controller": "openarm_right_gripper_position",
+}
+GRIPPER_EQUALITIES = {
+    "left_gripper_controller": "openarm_left_finger_mimic",
+    "right_gripper_controller": "openarm_right_finger_mimic",
+}
+GRIPPER_POSITION_RANGE = (0.0, 0.044)
+GRIPPER_STATE_BOUNDARY_TOLERANCE_M = 0.00005
+
+
+def normalize_joint_state_position(name: str, position: float) -> float:
+    """Clamp only tiny solver drift at a gripper's declared joint limits."""
+    if name not in FINGER_JOINTS:
+        return position
+
+    lower, upper = GRIPPER_POSITION_RANGE
+    tolerance = GRIPPER_STATE_BOUNDARY_TOLERANCE_M
+    if lower - tolerance <= position < lower:
+        return lower
+    if upper < position <= upper + tolerance:
+        return upper
+    return position
+
+
+class NativeMuJoCoViewer:
+    """Adapt MuJoCo's supported passive viewer to the legacy bridge API."""
+
+    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        from mujoco import viewer
+
+        self._handle = viewer.launch_passive(model, data)
+        self.cam = self._handle.cam
+
+    @property
+    def is_alive(self) -> bool:
+        return bool(self._handle.is_running())
+
+    def render(self) -> None:
+        self._handle.sync()
+
+    def close(self) -> None:
+        self._handle.close()
+
+
+def create_mujoco_viewer(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+) -> tuple[Any, str]:
+    """Use the bundled official viewer, with compatibility for older installs."""
+
+    try:
+        return NativeMuJoCoViewer(model, data), "mujoco.viewer"
+    except ImportError:
+        import mujoco_viewer
+
+        return mujoco_viewer.MujocoViewer(model, data), "mujoco_viewer"
+
+
+@dataclass
+class ControllerExecution:
+    name: str
+    allowed_joints: tuple[str, ...]
+    reserved: bool = False
+    executing: bool = False
+    status: str = "idle"
+    error_code: int = FollowJointTrajectory.Result.SUCCESSFUL
+    error_string: str = ""
+    joints: list[str] = field(default_factory=list)
+    points: list[JointTrajectoryPoint] = field(default_factory=list)
+    times: list[float] = field(default_factory=list)
+    start_positions: list[float] = field(default_factory=list)
+    start_time: float = 0.0
+    collision_latched: bool = False
+    settled_since: float | None = None
+
+
+class MuJoCoMoveItBridge(Node):
+    def __init__(self) -> None:
+        super().__init__("mujoco_moveit_bridge")
+
+        self.declare_parameter(
+            "model_path", "/home/hkz/openarm_rosclaw/ros_ws/mujoco_models/mujoco_arm.xml"
+        )
+        self.declare_parameter(
+            "srdf_path",
+            "/home/hkz/openarm_rosclaw/ros_ws/src/openarm_moveit_config/srdf/openarm.srdf",
+        )
+        self.declare_parameter("enable_legacy_topic", False)
+        self.declare_parameter("enable_gripper_controllers", False)
+        self.declare_parameter("headless", False)
+        self.declare_parameter("position_gain", 0.15)
+        self.declare_parameter("goal_tolerance", 0.003)
+        self.declare_parameter("gripper_goal_tolerance", 0.0005)
+        self.declare_parameter("gripper_velocity_tolerance", 0.001)
+        self.declare_parameter("gripper_settle_time", 0.5)
+        self.declare_parameter("goal_time_margin", 5.0)
+        self.declare_parameter("collision_penetration_threshold", 0.003)
+        self.declare_parameter("ignore_same_arm_self_collisions", True)
+        self.declare_parameter("allowed_finger_contact_geoms", [""])
+        self.declare_parameter("observed_object_body", "")
+        self.declare_parameter("observed_object_topic", "/openarm/pick_demo/object_pose")
+        self.declare_parameter("gripper_initial_position", 0.0)
+        self.declare_parameter(
+            "left_initial_positions", [0.0, -0.35, 0.0, 0.7, 0.0, -0.35, 0.0]
+        )
+        self.declare_parameter(
+            "right_initial_positions", [0.0, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0]
+        )
+
+        model_path = str(self.get_parameter("model_path").value)
+        print(f"{CYAN}Loading MuJoCo model: {model_path}{END}")
+        self.model = mujoco.MjModel.from_xml_path(model_path)
+        self.data = mujoco.MjData(self.model)
+        self.enable_gripper_controllers = bool(
+            self.get_parameter("enable_gripper_controllers").value
+        )
+        self.gripper_actuator_ids: dict[str, int] = {}
+        if self.enable_gripper_controllers:
+            self._validate_gripper_model()
+        self.allowed_finger_contact_geoms = {
+            str(name)
+            for name in self.get_parameter("allowed_finger_contact_geoms").value
+            if str(name)
+        }
+        self.ignore_same_arm_self_collisions = bool(
+            self.get_parameter("ignore_same_arm_self_collisions").value
+        )
+
+        for joint_id in range(self.model.njnt):
+            dof_id = int(self.model.jnt_dofadr[joint_id])
+            if dof_id >= 0:
+                self.model.dof_damping[dof_id] = 0.5
+
+        # Preserve model-authored free-joint poses while arm joints are replaced below.
+        self.data.qpos[:] = self.model.qpos0
+        self.data.qvel[:] = 0.0
+
+        left_initial = [
+            float(value)
+            for value in self.get_parameter("left_initial_positions").value
+        ]
+        right_initial = [
+            float(value)
+            for value in self.get_parameter("right_initial_positions").value
+        ]
+        if len(left_initial) != 7 or len(right_initial) != 7:
+            raise ValueError("Each initial arm position parameter must contain 7 values")
+        initial_positions = dict(zip(LEFT_ARM_JOINTS, left_initial, strict=False))
+        initial_positions.update(zip(RIGHT_ARM_JOINTS, right_initial, strict=False))
+        gripper_initial = float(self.get_parameter("gripper_initial_position").value)
+        if not GRIPPER_POSITION_RANGE[0] <= gripper_initial <= GRIPPER_POSITION_RANGE[1]:
+            raise ValueError("gripper_initial_position must be between 0.0 and 0.044 m")
+        initial_positions.update({name: gripper_initial for name in FINGER_JOINTS})
+        for name, position in initial_positions.items():
+            joint_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_JOINT, name
+            )
+            if joint_id == -1:
+                raise ValueError(f"Initial-position joint is absent from MuJoCo: {name}")
+            self.data.qpos[int(self.model.jnt_qposadr[joint_id])] = position
+        mujoco.mj_forward(self.model, self.data)
+
+        self.state_lock = threading.RLock()
+        self.running = True
+        self.target_angles = dict.fromkeys(JOINT_NAMES, 0.0)
+        self.target_angles.update(initial_positions)
+        self.actual_positions = {
+            name: self._joint_position_from_data(name) for name in JOINT_NAMES
+        }
+        self.desired_positions = dict(self.actual_positions)
+        for actuator_id in self.gripper_actuator_ids.values():
+            self.data.ctrl[actuator_id] = gripper_initial
+        controller_joints = dict(CONTROLLER_JOINTS)
+        if self.enable_gripper_controllers:
+            controller_joints.update(GRIPPER_CONTROLLER_JOINTS)
+        self.controllers: dict[str, ControllerExecution] = {
+            name: ControllerExecution(name, joints)
+            for name, joints in controller_joints.items()
+        }
+
+        self.collision_detected = False
+        self.collision_info: list[tuple[str, str, float]] = []
+        self.last_collision_signature = ()
+        self.srdf_disabled_collision_pairs = self._load_srdf_collision_exclusions()
+        self.excluded_geom_pairs = self._build_exclusion_list()
+
+        self.joint_pub = self.create_publisher(
+            JointState, "/joint_states", qos_profile_sensor_data
+        )
+        self.collision_pub = self.create_publisher(Marker, "/collision_status", 10)
+        observed_body_name = str(self.get_parameter("observed_object_body").value).strip()
+        self.observed_object_body_id = (
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, observed_body_name)
+            if observed_body_name
+            else -1
+        )
+        if observed_body_name and self.observed_object_body_id == -1:
+            raise ValueError(f"Observed object body is absent from MuJoCo: {observed_body_name}")
+        self.object_pose_pub = None
+        if self.observed_object_body_id != -1:
+            self.object_pose_pub = self.create_publisher(
+                PoseStamped,
+                str(self.get_parameter("observed_object_topic").value),
+                10,
+            )
+
+        self.legacy_sub = None
+        if bool(self.get_parameter("enable_legacy_topic").value):
+            legacy_qos = QoSProfile(
+                depth=10, reliability=ReliabilityPolicy.BEST_EFFORT
+            )
+            self.legacy_sub = self.create_subscription(
+                JointTrajectory,
+                "/joint_trajectory_cmds",
+                self._legacy_trajectory_callback,
+                legacy_qos,
+            )
+            self.get_logger().warning("Legacy /joint_trajectory_cmds input is enabled")
+
+        callback_group = ReentrantCallbackGroup()
+        self.action_servers = []
+        for controller_name in self.controllers:
+            action_name = f"/{controller_name}/follow_joint_trajectory"
+            server = ActionServer(
+                self,
+                FollowJointTrajectory,
+                action_name,
+                execute_callback=partial(self._execute_callback, controller_name),
+                goal_callback=partial(self._goal_callback, controller_name),
+                cancel_callback=partial(self._cancel_callback, controller_name),
+                callback_group=callback_group,
+            )
+            self.action_servers.append(server)
+
+        self.headless = bool(self.get_parameter("headless").value)
+        self.viewer = None
+        self.viewer_backend = None
+        if not self.headless:
+            print(f"{CYAN}Creating MuJoCo viewer...{END}")
+            self.viewer, self.viewer_backend = create_mujoco_viewer(
+                self.model,
+                self.data,
+            )
+            self.viewer.cam.distance = 2.0
+            self.viewer.cam.azimuth = 45.0
+            self.viewer.cam.elevation = -20.0
+            self.viewer.cam.lookat[:] = [0.0, 0.0, 0.5]
+
+        print(f"{GREEN}Dual-arm MuJoCo MoveIt bridge is ready{END}")
+        print(f"   Headless: {self.headless}")
+        if self.viewer_backend is not None:
+            print(f"   Viewer backend: {self.viewer_backend}")
+        print(f"   Left initial joints:  {left_initial}")
+        print(f"   Right initial joints: {right_initial}")
+        print(
+            "   Ignore same-arm self collisions: "
+            f"{self.ignore_same_arm_self_collisions}"
+        )
+        print(
+            "   World TF authority: robot_state_publisher "
+            "(bridge TF publishing disabled)"
+        )
+        if self.allowed_finger_contact_geoms:
+            print(
+                "   Allowed finger contact geoms: "
+                f"{sorted(self.allowed_finger_contact_geoms)}"
+            )
+        for controller_name in self.controllers:
+            print(f"   /{controller_name}/follow_joint_trajectory")
+
+    def _validate_gripper_model(self) -> None:
+        """Require the candidate's native actuators and mimic constraints."""
+
+        for controller_name, actuator_name in GRIPPER_ACTUATORS.items():
+            actuator_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
+            )
+            if actuator_id == -1:
+                raise ValueError(
+                    "Gripper controllers were enabled, but MuJoCo actuator "
+                    f"'{actuator_name}' is absent"
+                )
+            equality_name = GRIPPER_EQUALITIES[controller_name]
+            equality_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_EQUALITY, equality_name
+            )
+            if equality_id == -1:
+                raise ValueError(
+                    "Gripper controllers were enabled, but MuJoCo equality "
+                    f"'{equality_name}' is absent"
+                )
+            self.gripper_actuator_ids[controller_name] = int(actuator_id)
+
+        for joints in GRIPPER_CONTROLLER_JOINTS.values():
+            for joint_name in joints:
+                joint_id = mujoco.mj_name2id(
+                    self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name
+                )
+                if joint_id == -1:
+                    raise ValueError(
+                        f"Gripper driver joint '{joint_name}' is absent"
+                    )
+
+    def _goal_tolerance(self, controller_name: str) -> float:
+        parameter = (
+            "gripper_goal_tolerance"
+            if controller_name in GRIPPER_CONTROLLER_JOINTS
+            else "goal_tolerance"
+        )
+        return float(self.get_parameter(parameter).value)
+
+    @staticmethod
+    def _point_time(point: JointTrajectoryPoint) -> float:
+        return float(point.time_from_start.sec) + float(
+            point.time_from_start.nanosec
+        ) / 1.0e9
+
+    def _joint_position_from_data(self, name: str) -> float:
+        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if joint_id == -1:
+            return 0.0
+        position = float(self.data.qpos[int(self.model.jnt_qposadr[joint_id])])
+        return normalize_joint_state_position(name, position)
+
+    def _joint_velocity_from_data(self, name: str) -> float:
+        joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if joint_id == -1:
+            return 0.0
+        return float(self.data.qvel[int(self.model.jnt_dofadr[joint_id])])
+
+    def _load_srdf_collision_exclusions(self) -> set:
+        srdf_path = str(self.get_parameter("srdf_path").value)
+        try:
+            root = ET.parse(srdf_path).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise RuntimeError(f"Cannot load SRDF collision exclusions: {exc}") from exc
+
+        pairs = set()
+        for element in root.findall(".//disable_collisions"):
+            link_a = element.get("link1", "")
+            link_b = element.get("link2", "")
+            if link_a and link_b:
+                pairs.add(frozenset((link_a, link_b)))
+        print(f"   Loaded {len(pairs)} disabled collision pairs from SRDF")
+        return pairs
+
+    @staticmethod
+    def _canonical_geom_link(name: str) -> str:
+        for suffix in ("_collision", "_visual"):
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+        return name
+
+    def _build_exclusion_list(self) -> set:
+        excluded = set()
+        for geom_a in range(self.model.ngeom):
+            body_a = int(self.model.geom_bodyid[geom_a])
+            name_a = mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_BODY, body_a
+            ) or f"body{body_a}"
+
+            for geom_b in range(geom_a + 1, self.model.ngeom):
+                body_b = int(self.model.geom_bodyid[geom_b])
+                name_b = mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_BODY, body_b
+                ) or f"body{body_b}"
+
+                if body_a == body_b:
+                    excluded.add((geom_a, geom_b))
+                    continue
+
+                geom_name_a = mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_a
+                ) or ""
+                geom_name_b = mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_b
+                ) or ""
+                label_a = f"{name_a} {geom_name_a}"
+                label_b = f"{name_b} {geom_name_b}"
+                same_left_arm = (
+                    "openarm_left_" in label_a and "openarm_left_" in label_b
+                )
+                same_right_arm = (
+                    "openarm_right_" in label_a and "openarm_right_" in label_b
+                )
+                if self.ignore_same_arm_self_collisions and (
+                    same_left_arm or same_right_arm
+                ):
+                    excluded.add((geom_a, geom_b))
+                    continue
+                body_pair = frozenset((name_a, name_b))
+                geom_link_pair = frozenset(
+                    (
+                        self._canonical_geom_link(geom_name_a),
+                        self._canonical_geom_link(geom_name_b),
+                    )
+                )
+                if (
+                    body_pair in self.srdf_disabled_collision_pairs
+                    or geom_link_pair in self.srdf_disabled_collision_pairs
+                ):
+                    excluded.add((geom_a, geom_b))
+                    continue
+
+                parent_a = int(self.model.body_parentid[body_a])
+                parent_b = int(self.model.body_parentid[body_b])
+                if parent_a == body_b or parent_b == body_a:
+                    excluded.add((geom_a, geom_b))
+                    continue
+
+                # Model-specific fixed installation contact from the original model.
+                if {body_a, body_b} == {1, 5}:
+                    excluded.add((geom_a, geom_b))
+                    continue
+
+                same_left_gripper = (
+                    "openarm_left_" in label_a
+                    and "openarm_left_" in label_b
+                    and "finger" in label_a
+                    and "finger" in label_b
+                )
+                same_right_gripper = (
+                    "openarm_right_" in label_a
+                    and "openarm_right_" in label_b
+                    and "finger" in label_a
+                    and "finger" in label_b
+                )
+                if same_left_gripper or same_right_gripper:
+                    excluded.add((geom_a, geom_b))
+
+        print(f"   Excluded {len(excluded)} fixed/adjacent collision pairs")
+        return excluded
+
+    def _check_collision(self) -> bool:
+        collision_map = {}
+        penetration = float(
+            self.get_parameter("collision_penetration_threshold").value
+        )
+        for index in range(self.data.ncon):
+            contact = self.data.contact[index]
+            geom_a = int(contact.geom[0])
+            geom_b = int(contact.geom[1])
+            pair = (min(geom_a, geom_b), max(geom_a, geom_b))
+            if pair in self.excluded_geom_pairs or float(contact.dist) >= -penetration:
+                continue
+
+            name_a = mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_a
+            ) or f"geom{geom_a}"
+            name_b = mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_b
+            ) or f"geom{geom_b}"
+            finger_a = name_a.startswith("openarm_") and "finger" in name_a
+            finger_b = name_b.startswith("openarm_") and "finger" in name_b
+            allowed_grasp_contact = (
+                finger_a and name_b in self.allowed_finger_contact_geoms
+            ) or (
+                finger_b and name_a in self.allowed_finger_contact_geoms
+            )
+            if allowed_grasp_contact:
+                continue
+            key = tuple(sorted((name_a, name_b)))
+            distance = float(contact.dist)
+            if key not in collision_map or distance < collision_map[key]:
+                collision_map[key] = distance
+
+        collisions = [
+            (name_a, name_b, distance)
+            for (name_a, name_b), distance in sorted(collision_map.items())
+        ]
+
+        signature = tuple(sorted((name_a, name_b) for name_a, name_b, _ in collisions))
+        if signature != self.last_collision_signature:
+            if collisions:
+                self.get_logger().warning(
+                    "MuJoCo collision set changed:\n  "
+                    + "\n  ".join(
+                        f"{name_a} <-> {name_b}, penetration={-distance * 1000.0:.2f} mm"
+                        for name_a, name_b, distance in collisions
+                    )
+                )
+            elif self.last_collision_signature:
+                self.get_logger().info("MuJoCo collisions cleared")
+            self.last_collision_signature = signature
+
+        with self.state_lock:
+            self.collision_info = collisions
+            self.collision_detected = bool(collisions)
+            if collisions:
+                details = ", ".join(f"{a}<->{b}" for a, b, _ in collisions[:3])
+                for state in self.controllers.values():
+                    if state.executing:
+                        state.collision_latched = True
+                        self._finish_execution_locked(
+                            state,
+                            "aborted",
+                            FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED,
+                            f"MuJoCo collision detected: {details}",
+                        )
+        return bool(collisions)
+
+    def _validate_trajectory(
+        self, state: ControllerExecution, trajectory: JointTrajectory
+    ) -> str | None:
+        if not trajectory.joint_names:
+            return "trajectory has no joint names"
+        if len(set(trajectory.joint_names)) != len(trajectory.joint_names):
+            return "trajectory contains duplicate joint names"
+
+        unknown = [
+            name for name in trajectory.joint_names if name not in state.allowed_joints
+        ]
+        if unknown:
+            return f"joints do not belong to {state.name}: {unknown}"
+        if not trajectory.points:
+            return "trajectory has no points"
+
+        previous_time = -1.0
+        expected_positions = len(trajectory.joint_names)
+        for index, point in enumerate(trajectory.points):
+            if len(point.positions) != expected_positions:
+                return (
+                    f"point {index} has {len(point.positions)} positions; "
+                    f"expected {expected_positions}"
+                )
+            if any(not math.isfinite(float(value)) for value in point.positions):
+                return f"point {index} contains a non-finite position"
+            if state.name in GRIPPER_CONTROLLER_JOINTS:
+                lower, upper = GRIPPER_POSITION_RANGE
+                outside = [
+                    float(value)
+                    for value in point.positions
+                    if not lower <= float(value) <= upper
+                ]
+                if outside:
+                    return (
+                        f"point {index} exceeds calibrated gripper range "
+                        f"[{lower:.3f}, {upper:.3f}] m: {outside}"
+                    )
+            point_time = self._point_time(point)
+            if (
+                not math.isfinite(point_time)
+                or point_time < 0.0
+                or point_time < previous_time
+            ):
+                return "trajectory time_from_start is not monotonic"
+            previous_time = point_time
+        return None
+
+    def _goal_callback(self, controller_name: str, goal_request) -> GoalResponse:
+        state = self.controllers[controller_name]
+        error = self._validate_trajectory(state, goal_request.trajectory)
+        if error:
+            self.get_logger().error(f"Rejecting {controller_name} goal: {error}")
+            return GoalResponse.REJECT
+
+        with self.state_lock:
+            if state.executing or state.reserved:
+                self.get_logger().warning(f"Rejecting {controller_name} goal: busy")
+                return GoalResponse.REJECT
+            state.reserved = True
+        return GoalResponse.ACCEPT
+
+    def _cancel_callback(self, _controller_name: str, _goal_handle) -> CancelResponse:
+        return CancelResponse.ACCEPT
+
+    def _begin_trajectory_locked(
+        self, state: ControllerExecution, trajectory: JointTrajectory
+    ) -> None:
+        state.joints = list(trajectory.joint_names)
+        state.points = [copy.deepcopy(point) for point in trajectory.points]
+        state.times = [self._point_time(point) for point in state.points]
+        state.start_positions = [self.actual_positions[name] for name in state.joints]
+        state.start_time = time.monotonic()
+        state.status = "executing"
+        state.error_code = FollowJointTrajectory.Result.SUCCESSFUL
+        state.error_string = ""
+        state.collision_latched = False
+        state.settled_since = None
+        state.executing = True
+        self.desired_positions.update(
+            zip(state.joints, state.start_positions, strict=False)
+        )
+
+    def _finish_execution_locked(
+        self,
+        state: ControllerExecution,
+        status: str,
+        error_code: int,
+        error_string: str,
+    ) -> None:
+        if not state.executing:
+            return
+        state.executing = False
+        state.status = status
+        state.error_code = error_code
+        state.error_string = error_string
+        state.settled_since = None
+        if status != "succeeded":
+            for name in state.allowed_joints:
+                self.target_angles[name] = self.actual_positions[name]
+                self.desired_positions[name] = self.actual_positions[name]
+
+    def _cancel_execution(self, state: ControllerExecution, reason: str) -> None:
+        with self.state_lock:
+            self._finish_execution_locked(
+                state,
+                "canceled",
+                FollowJointTrajectory.Result.SUCCESSFUL,
+                reason,
+            )
+
+    def _trajectory_feedback(
+        self, state: ControllerExecution
+    ) -> FollowJointTrajectory.Feedback:
+        feedback = FollowJointTrajectory.Feedback()
+        feedback.header.stamp = self.get_clock().now().to_msg()
+        with self.state_lock:
+            names = list(state.joints)
+            desired = [self.desired_positions[name] for name in names]
+            actual = [self.actual_positions[name] for name in names]
+            elapsed = max(0.0, time.monotonic() - state.start_time)
+
+        feedback.joint_names = names
+        feedback.desired.positions = desired
+        feedback.actual.positions = actual
+        feedback.error.positions = [
+            d - a for d, a in zip(desired, actual, strict=False)
+        ]
+        elapsed_msg = Duration(seconds=elapsed).to_msg()
+        feedback.desired.time_from_start = elapsed_msg
+        feedback.actual.time_from_start = elapsed_msg
+        feedback.error.time_from_start = elapsed_msg
+        return feedback
+
+    def _execute_callback(self, controller_name: str, goal_handle):
+        state = self.controllers[controller_name]
+        with self.state_lock:
+            self._begin_trajectory_locked(state, goal_handle.request.trajectory)
+            max_joint_travel = max(
+                abs(float(target) - start)
+                for target, start in zip(
+                    state.points[-1].positions,
+                    state.start_positions,
+                    strict=False,
+                )
+            )
+
+        self.get_logger().info(
+            f"Executing {controller_name} trajectory with {len(state.points)} "
+            f"points; max_joint_travel={max_joint_travel:.6f} rad"
+        )
+        try:
+            while self.running:
+                if goal_handle.is_cancel_requested:
+                    self._cancel_execution(state, "trajectory canceled by client")
+
+                with self.state_lock:
+                    still_executing = state.executing
+                if not still_executing:
+                    break
+
+                goal_handle.publish_feedback(self._trajectory_feedback(state))
+                time.sleep(0.05)
+
+            with self.state_lock:
+                if state.executing:
+                    self._finish_execution_locked(
+                        state,
+                        "aborted",
+                        FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED,
+                        "bridge stopped during trajectory execution",
+                    )
+                status = state.status
+                error_code = state.error_code
+                error_string = state.error_string
+
+            result = FollowJointTrajectory.Result()
+            result.error_code = error_code
+            result.error_string = error_string
+            if status == "succeeded":
+                goal_handle.succeed()
+            elif status == "canceled":
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
+            return result
+        finally:
+            with self.state_lock:
+                state.reserved = False
+
+    def _legacy_trajectory_callback(self, trajectory: JointTrajectory) -> None:
+        names = set(trajectory.joint_names)
+        matches = [
+            state
+            for state in self.controllers.values()
+            if names and names.issubset(set(state.allowed_joints))
+        ]
+        if len(matches) != 1:
+            self.get_logger().error(
+                "Legacy trajectory must contain joints from exactly one arm"
+            )
+            return
+
+        state = matches[0]
+        error = self._validate_trajectory(state, trajectory)
+        if error:
+            self.get_logger().error(f"Ignoring legacy trajectory: {error}")
+            return
+        with self.state_lock:
+            if state.executing or state.reserved:
+                self.get_logger().warning(f"Ignoring legacy trajectory: {state.name} busy")
+                return
+            self._begin_trajectory_locked(state, trajectory)
+
+    def _sample_trajectory_locked(
+        self, state: ControllerExecution, elapsed: float
+    ) -> list[float]:
+        first_time = state.times[0]
+        if elapsed <= first_time:
+            alpha = 1.0 if first_time <= 0.0 else elapsed / first_time
+            return [
+                start + (target - start) * alpha
+                for start, target in zip(
+                    state.start_positions,
+                    state.points[0].positions,
+                    strict=False,
+                )
+            ]
+
+        next_index = bisect.bisect_right(state.times, elapsed)
+        if next_index >= len(state.points):
+            return list(state.points[-1].positions)
+
+        previous_index = next_index - 1
+        previous_time = state.times[previous_index]
+        next_time = state.times[next_index]
+        duration = next_time - previous_time
+        alpha = 1.0 if duration <= 0.0 else (elapsed - previous_time) / duration
+        return [
+            start + (target - start) * alpha
+            for start, target in zip(
+                state.points[previous_index].positions,
+                state.points[next_index].positions,
+                strict=False,
+            )
+        ]
+
+    def _advance_trajectories(self) -> None:
+        with self.state_lock:
+            for state in self.controllers.values():
+                if not state.executing:
+                    continue
+
+                elapsed = time.monotonic() - state.start_time
+                desired = self._sample_trajectory_locked(state, elapsed)
+                for name, position in zip(state.joints, desired, strict=False):
+                    self.target_angles[name] = float(position)
+                    self.desired_positions[name] = float(position)
+
+                final_time = state.times[-1]
+                if elapsed < final_time:
+                    continue
+
+                final_positions = state.points[-1].positions
+                final_errors = {
+                    name: abs(float(target) - self.actual_positions[name])
+                    for name, target in zip(
+                        state.joints, final_positions, strict=False
+                    )
+                }
+                worst_joint = max(final_errors, key=final_errors.get)
+                max_error = final_errors[worst_joint]
+                tolerance = self._goal_tolerance(state.name)
+                is_gripper = state.name in GRIPPER_CONTROLLER_JOINTS
+                max_velocity = 0.0
+                settled = max_error <= tolerance
+                if is_gripper:
+                    max_velocity = max(
+                        abs(self._joint_velocity_from_data(name))
+                        for name in state.joints
+                    )
+                    velocity_tolerance = float(
+                        self.get_parameter("gripper_velocity_tolerance").value
+                    )
+                    settled = settled and max_velocity <= velocity_tolerance
+                    now = time.monotonic()
+                    if settled:
+                        if state.settled_since is None:
+                            state.settled_since = now
+                        settle_time = float(
+                            self.get_parameter("gripper_settle_time").value
+                        )
+                        settled = now - state.settled_since >= settle_time
+                    else:
+                        state.settled_since = None
+
+                if settled:
+                    self._finish_execution_locked(
+                        state,
+                        "succeeded",
+                        FollowJointTrajectory.Result.SUCCESSFUL,
+                        "",
+                    )
+                    unit = "m" if is_gripper else "rad"
+                    velocity_detail = (
+                        f", max_final_velocity={max_velocity:.6f} m/s"
+                        if is_gripper
+                        else ""
+                    )
+                    self.get_logger().info(
+                        f"{state.name} trajectory completed; "
+                        f"max_final_error={max_error:.6f} {unit}"
+                        f"{velocity_detail}"
+                    )
+                    continue
+
+                margin = float(self.get_parameter("goal_time_margin").value)
+                if elapsed > final_time + margin:
+                    unit = "m" if is_gripper else "rad"
+                    self._finish_execution_locked(
+                        state,
+                        "aborted",
+                        FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED,
+                        f"final error {max_error:.6f} {unit} on {worst_joint} "
+                        f"(target={self.desired_positions[worst_joint]:.9f}, "
+                        f"actual={self.actual_positions[worst_joint]:.9f}) "
+                        "exceeds tolerance or motion did not settle before the deadline",
+                    )
+
+    def _apply_position_targets(self) -> None:
+        gain = float(self.get_parameter("position_gain").value)
+        with self.state_lock:
+            targets = dict(self.target_angles)
+
+        for name, target in targets.items():
+            if self.enable_gripper_controllers and name in FINGER_JOINTS:
+                continue
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if joint_id == -1:
+                continue
+            qpos_address = int(self.model.jnt_qposadr[joint_id])
+            dof_address = int(self.model.jnt_dofadr[joint_id])
+            current = float(self.data.qpos[qpos_address])
+            self.data.qpos[qpos_address] = current + (target - current) * gain
+            if dof_address >= 0:
+                self.data.qvel[dof_address] = 0.0
+
+        if self.enable_gripper_controllers:
+            for controller_name, joints in GRIPPER_CONTROLLER_JOINTS.items():
+                actuator_id = self.gripper_actuator_ids[controller_name]
+                self.data.ctrl[actuator_id] = targets[joints[0]]
+
+    def _update_actual_positions(self) -> None:
+        positions = {name: self._joint_position_from_data(name) for name in JOINT_NAMES}
+        with self.state_lock:
+            self.actual_positions.update(positions)
+
+    def _publish_joint_states(self) -> None:
+        message = JointState()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.name = list(JOINT_NAMES)
+        with self.state_lock:
+            message.position = [self.actual_positions[name] for name in JOINT_NAMES]
+        self.joint_pub.publish(message)
+
+    def _publish_observed_object_pose(self) -> None:
+        if self.object_pose_pub is None or self.observed_object_body_id == -1:
+            return
+        body_id = self.observed_object_body_id
+        message = PoseStamped()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = "world"
+        message.pose.position.x = float(self.data.xpos[body_id][0])
+        message.pose.position.y = float(self.data.xpos[body_id][1])
+        message.pose.position.z = float(self.data.xpos[body_id][2])
+        message.pose.orientation.w = float(self.data.xquat[body_id][0])
+        message.pose.orientation.x = float(self.data.xquat[body_id][1])
+        message.pose.orientation.y = float(self.data.xquat[body_id][2])
+        message.pose.orientation.z = float(self.data.xquat[body_id][3])
+        self.object_pose_pub.publish(message)
+
+    def _publish_collision_status(self) -> None:
+        marker = Marker()
+        marker.header.frame_id = "world"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "mujoco_collision_status"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x = 0.5
+        marker.pose.position.y = 0.5
+        marker.pose.position.z = 1.0
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.08
+        with self.state_lock:
+            collision = self.collision_detected
+        if collision:
+            marker.color.r = 1.0
+            marker.color.a = 1.0
+        else:
+            marker.color.g = 1.0
+            marker.color.a = 0.5
+        self.collision_pub.publish(marker)
+
+    def _manual_adjust(self, arm: str, joint_number: int, delta: float) -> None:
+        controller_name = f"{arm}_arm_controller"
+        joint_name = f"openarm_{arm}_joint{joint_number}"
+        state = self.controllers[controller_name]
+        with self.state_lock:
+            if state.executing:
+                self._finish_execution_locked(
+                    state,
+                    "aborted",
+                    FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED,
+                    "trajectory interrupted by keyboard control",
+                )
+            self.target_angles[joint_name] += delta
+
+    def _keyboard_loop(self) -> None:
+        if not sys.stdin.isatty():
+            self.get_logger().warning("Keyboard control disabled: stdin is not a TTY")
+            return
+        settings = termios.tcgetattr(sys.stdin)
+        controls = {
+            "q": ("left", 1, 0.05),
+            "a": ("left", 1, -0.05),
+            "w": ("left", 2, 0.05),
+            "s": ("left", 2, -0.05),
+            "r": ("left", 4, 0.05),
+            "f": ("left", 4, -0.05),
+            "t": ("right", 1, 0.05),
+            "g": ("right", 1, -0.05),
+            "y": ("right", 2, 0.05),
+            "h": ("right", 2, -0.05),
+            "u": ("right", 4, 0.05),
+            "j": ("right", 4, -0.05),
+        }
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while self.running:
+                readable, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not readable:
+                    continue
+                key = sys.stdin.read(1).lower()
+                if key == "\x1b":
+                    self.running = False
+                elif key == "0":
+                    with self.state_lock:
+                        for state in self.controllers.values():
+                            if state.executing:
+                                self._finish_execution_locked(
+                                    state,
+                                    "aborted",
+                                    FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED,
+                                    "trajectory interrupted by keyboard reset",
+                                )
+                        for name in self.target_angles:
+                            self.target_angles[name] = 0.0
+                elif key in controls:
+                    self._manual_adjust(*controls[key])
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+
+    def run(self) -> None:
+        print(f"{GREEN}Dual-arm MuJoCo simulation is running{END}")
+        print("   Left: Q/A joint1, W/S joint2, R/F joint4")
+        print("   Right: T/G joint1, Y/H joint2, U/J joint4; 0=zero, ESC=exit")
+        if not self.headless:
+            threading.Thread(target=self._keyboard_loop, daemon=True).start()
+
+        frame_count = 0
+        try:
+            while self.running and (self.viewer is None or self.viewer.is_alive):
+                self._advance_trajectories()
+                self._apply_position_targets()
+                mujoco.mj_step(self.model, self.data)
+                self._update_actual_positions()
+                self._check_collision()
+                if self.viewer is not None:
+                    self.viewer.render()
+                self._publish_joint_states()
+                self._publish_observed_object_pose()
+
+                if frame_count % 50 == 0:
+                    self._publish_collision_status()
+
+                frame_count += 1
+                if frame_count % 100 == 0:
+                    with self.state_lock:
+                        statuses = " ".join(
+                            f"{name}={state.status}"
+                            for name, state in self.controllers.items()
+                        )
+                        collision_count = len(self.collision_info)
+                    print(
+                        f"\rframes={frame_count} {statuses} collisions={collision_count}",
+                        end="",
+                        flush=True,
+                    )
+                time.sleep(0.002)
+        finally:
+            with self.state_lock:
+                self.running = False
+                for state in self.controllers.values():
+                    if state.executing:
+                        self._finish_execution_locked(
+                            state,
+                            "aborted",
+                            FollowJointTrajectory.Result.PATH_TOLERANCE_VIOLATED,
+                            "MuJoCo bridge stopped",
+                        )
+            if self.viewer is not None:
+                self.viewer.close()
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    bridge = None
+    executor = None
+    spin_thread = None
+    try:
+        bridge = MuJoCoMoveItBridge()
+        executor = MultiThreadedExecutor(num_threads=6)
+        executor.add_node(bridge)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+        bridge.run()
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        print(f"\n{RED}Bridge error: {exc}{END}")
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        if bridge is not None:
+            bridge.running = False
+        if executor is not None:
+            executor.shutdown(timeout_sec=2.0)
+        if spin_thread is not None:
+            spin_thread.join(timeout=2.0)
+        if bridge is not None:
+            for server in bridge.action_servers:
+                server.destroy()
+            bridge.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        print("\nMuJoCo bridge stopped")
+
+
+if __name__ == "__main__":
+    main()

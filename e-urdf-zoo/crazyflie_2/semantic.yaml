@@ -1,0 +1,130 @@
+# Crazyflie 2.1 Semantic Annotation — Physical DNA Semantic Layer
+# For VLM/LLM grounding and task decomposition
+
+semantic_version: "1.0"
+
+# ── Functional Regions ──
+functional_regions:
+  - name: fuselage
+    link: base_link
+    tags: [body, central, pcb, tiny]
+    description: "Central PCB fuselage housing STM32 microcontroller, radio, and battery"
+    affordances: [carry, launch_by_hand]
+    visual_features:
+      - type: box
+        color: white
+        dominant: true
+
+  - name: front_left_arm
+    link: arm_front_left
+    tags: [arm, structural, motor_mount, pcb_trace]
+    description: "Front-left arm with integrated PCB motor driver traces"
+    affordances: []
+    visual_features:
+      - type: thin_arm
+        color: white
+
+  - name: front_right_arm
+    link: arm_front_right
+    tags: [arm, structural, motor_mount, pcb_trace]
+    description: "Front-right arm with integrated PCB motor driver traces"
+    affordances: []
+    visual_features:
+      - type: thin_arm
+        color: white
+
+  - name: rear_left_arm
+    link: arm_rear_left
+    tags: [arm, structural, motor_mount, pcb_trace]
+    description: "Rear-left arm with integrated PCB motor driver traces"
+    affordances: []
+    visual_features:
+      - type: thin_arm
+        color: white
+
+  - name: rear_right_arm
+    link: arm_rear_right
+    tags: [arm, structural, motor_mount, pcb_trace]
+    description: "Rear-right arm with integrated PCB motor driver traces"
+    affordances: []
+    visual_features:
+      - type: thin_arm
+        color: white
+
+  - name: rotor_assembly
+    links: [propeller_fl, propeller_fr, propeller_rl, propeller_rr]
+    tags: [rotor, propeller, tiny, spinning, hazard]
+    description: "Four tiny propellers providing lift"
+    affordances: []
+    visual_features:
+      - type: small_disc
+        color: transparent_or_black
+
+  - name: expansion_decks
+    tags: [accessory, stackable, sensor_deck]
+    description: "Stackable expansion decks on top of fuselage"
+    affordances: [attach_sensor, attach_led]
+
+# ── Grasp Points / Affordances ──
+grasp_points:
+  - name: fuselage_grasp
+    link: base_link
+    position: [0, 0, 0]
+    approach_direction: [0, 0, 1]
+    description: "For hand-launching the tiny drone"
+    safety: {max_force: 5.0}
+
+# ── Visual Features for VLM Grounding ──
+visual_features:
+  - name: x_body_frame
+    type: frame_structure
+    links: [arm_front_left, arm_front_right, arm_rear_left, arm_rear_right]
+    visual_cues: [white_pcb, symmetric, tiny]
+    llm_description: "Tiny X-shaped white PCB frame, approximately 9cm diagonal"
+
+  - name: usb_connector
+    type: connector
+    links: [base_link]
+    visual_cues: [micro_usb, side]
+    llm_description: "Micro-USB connector on the side for charging and programming"
+
+  - name: expansion_pins
+    type: pin_header
+    links: [base_link]
+    visual_cues: [gold_pins, top]
+    llm_description: "Gold pin headers on top for attaching expansion decks"
+
+  - name: spinning_rotors
+    type: rotating_discs
+    links: [propeller_fl, propeller_fr, propeller_rl, propeller_rr]
+    visual_cues: [transparent_blades, spinning_blur]
+    llm_description: "Four small transparent propellers spinning rapidly"
+
+  - name: led_indicators
+    type: led_lights
+    links: [base_link]
+    visual_cues: [colored_leds, blinking]
+    llm_description: "Small colored LEDs on the arms indicating status"
+
+# ── Task-Relevant Descriptions ──
+task_descriptions:
+  swarm_flight:
+    relevant_links: [base_link]
+    relevant_sensors: [imu, flow_deck]
+    workspace_hint: "Indoor spaces, maintain minimum 0.3m between drones"
+    collision_warning: "Drones are fragile, avoid collisions with walls and other drones"
+
+  indoor_navigation:
+    relevant_links: [base_link]
+    relevant_sensors: [flow_deck, multi_ranger_front, multi_ranger_back, multi_ranger_left, multi_ranger_right]
+    workspace_hint: "Navigate within enclosed indoor spaces with flat floors"
+
+  education_demo:
+    relevant_links: [base_link]
+    relevant_sensors: [imu, flow_deck]
+    workspace_hint: "Small demo area, keep spectators at safe distance"
+
+  light_show:
+    relevant_links: [base_link]
+    relevant_sensors: [led_deck]
+    workspace_hint: "Dark room for best visual effect"

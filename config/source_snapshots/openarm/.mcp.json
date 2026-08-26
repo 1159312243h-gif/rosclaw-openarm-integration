@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "rosclaw": {
+      "args": [
+        "-m",
+        "rosclaw.entrypoint",
+        "mcp",
+        "serve",
+        "--profile",
+        "${ROSCLAW_PROFILE:-default}",
+        "--project",
+        "${PWD}",
+        "--log-level",
+        "${ROSCLAW_LOG_LEVEL:-ERROR}"
+      ],
+      "command": "/home/hkz/rosclaw_env/bin/python",
+      "env": {
+        "ROSCLAW_AGENT_CLIENT": "${ROSCLAW_AGENT_CLIENT:-universal-agent}",
+        "ROSCLAW_HOME": "${ROSCLAW_HOME:-~/.rosclaw}",
+        "ROSCLAW_MCP_AUDIT": "1",
+        "ROSCLAW_PROFILE": "${ROSCLAW_PROFILE:-default}"
+      },
+      "timeout": 300000,
+      "type": "stdio"
+    }
+  },
+  "rosclaw": {
+    "cli": {
+      "args": [
+        "-m",
+        "rosclaw.entrypoint"
+      ],
+      "command": "/home/hkz/rosclaw_env/bin/python"
+    },
+    "project_root": "/home/hkz/openarm_rosclaw",
+    "robot_id": "openarm_dual_mujoco_01",
+    "schema_version": "rosclaw.agent.context.v2",
+    "transport": "stdio"
+  }
+}

@@ -1,0 +1,18 @@
+schema_version: e_urdf.sandbox.v1
+engines:
+  mujoco:
+    supported: true
+    model_path: model/model.urdf
+    status: converted
+  isaacsim:
+    supported: false
+    model_path: null
+    status: not_converted
+validation:
+  smoke_tests:
+    - load_urdf
+default_test_poses:
+  - id: open
+    description: Gripper fully open
+  - id: closed
+    description: Gripper fully closed

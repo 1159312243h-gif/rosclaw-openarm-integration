@@ -1,0 +1,216 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rosclaw"
+version = "1.0.1"
+description = "Trustworthy Physical Execution Runtime and Control Plane for Embodied Agents"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "ROSClaw Team", email = "ai@rosclaw.io"},
+]
+keywords = ["robotics", "ros2", "mcp", "llm", "embodied-ai", "physical-ai", "mujoco", "runtime", "eurdf"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "jieba",
+    # NumPy 2.5 type stubs require Python 3.12 syntax, while ROSClaw and its
+    # CI still support Python 3.11 and run mypy with python_version=3.11.
+    "numpy>=1.24.0,<2.5",
+    "mujoco>=3.0.0",
+    "mcp>=1.0.0,<2.0.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "websockets>=12.0",
+    "websocket-client>=1.0.0",
+    "openai>=1.0.0",
+    "packaging>=23.0",
+    "pydantic>=2.0.0",
+    "pymysql>=1.1.0",
+    "requests>=2.25.0",
+    "semver>=3.0.0",
+    "filelock>=3.0.0",
+    "cryptography>=42.0.0",
+    "mcap>=1.2.0",
+]
+
+[project.optional-dependencies]
+ros2 = [
+    "rclpy>=3.0.0",
+    "geometry-msgs",
+    "sensor-msgs",
+    "std-msgs",
+    "trajectory-msgs",
+    "control-msgs",
+]
+practice = [
+    "rosclaw-practice @ git+https://github.com/ros-claw/rosclaw-practice.git@bfb4ac7",
+]
+practice-export = [
+    "pandas>=2.0.0",
+    "pyarrow>=15.0.0",
+]
+seekdb = [
+    # Native SeekDB embedded/server backend (PR-SDB-1).  Pinned to the
+    # version validated on Jetson aarch64 (glibc 2.39, Python 3.12).
+    "pyseekdb==1.3.0",
+]
+embedding = [
+    # Qwen3 CrossEncoder prompt support landed in sentence-transformers 5.4.
+    "sentence-transformers>=5.4,<6",
+    # Qwen3 model support requires Transformers 4.51+ (upstream model card).
+    "transformers>=4.51,<6",
+]
+knowledge = [
+    "rosclaw-know>=1.0.2",
+    "rosclaw-how>=1.0.2",
+]
+lerobot = [
+    "lerobot>=0.6,<0.7",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "jsonschema>=4.0.0",
+    "rank-bm25>=0.2",
+    "Pillow>=10.0",
+    "httpx2>=2.0.0",
+    # rosclaw-how permits newer pyseekdb releases, but the native-memory
+    # integration and Jetson validation currently target the 1.3 API.
+    "pyseekdb==1.3.0",
+    "rosclaw-know>=1.0.2",
+    "rosclaw-how>=1.0.2",
+]
+dashboard = [
+    "rosclaw-dashboard>=1.0.0",
+]
+all = [
+    "rosclaw[ros2,dev,dashboard,knowledge,lerobot,seekdb,embedding]",
+]
+
+[project.scripts]
+rosclaw = "rosclaw.entrypoint:main"
+rosclaw-ur5-mcp = "rosclaw.mcp.ur5_server:main"
+rosclaw-mcp = "rosclaw.mcp.minimal_server:main"
+rosclaw-mcp-serve = "rosclaw.mcp.server:main"
+rosclawd = "rosclaw.daemon.cli:main"
+
+[project.entry-points."rosclaw.runtime_handlers"]
+rosclaw_builtin = "rosclaw.runtime.handlers"
+
+[project.urls]
+Homepage = "https://rosclaw.io"
+Repository = "https://github.com/ros-claw/rosclaw"
+Documentation = "https://docs.rosclaw.io"
+"Bug Tracker" = "https://github.com/ros-claw/rosclaw/issues"
+"Contact" = "mailto:ai@rosclaw.io"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rosclaw"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"e-urdf-zoo" = "rosclaw/eurdf_zoo_data"
+"configs" = "rosclaw/rh56_data/configs"
+"worker_plugins/lerobot_policy_rosclaw_rh56/policies/rh56_reference_policy_v1" = "rosclaw/rh56_data/policies/rh56_reference_policy_v1"
+"benchmarks/memory" = "rosclaw/benchmarks/memory"
+"worker_plugins/lerobot_policy_rosclaw_rh56/src/lerobot_policy_rosclaw_rh56" = "lerobot_policy_rosclaw_rh56"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/bin",
+    "/benchmarks",
+    "/e-urdf-zoo",
+    "/configs",
+    "/worker_plugins/lerobot_policy_rosclaw_rh56",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rosclaw"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = false
+ignore_missing_imports = true
+files = ["src/rosclaw"]
+# The legacy codebase is not fully typed. Errors are ignored globally and
+# re-enabled module-by-module as part of the gradual typing effort.
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "rosclaw.practice.*",
+    "rosclaw.darwin.*",
+    "rosclaw.memory.seekdb_client",
+]
+ignore_errors = false
+follow_imports = "skip"
+disable_error_code = [
+    "type-arg",
+    "no-any-return",
+    "no-untyped-def",
+    "no-untyped-call",
+    "untyped-decorator",
+    "no-redef",
+]
+
+[[tool.mypy.overrides]]
+module = "rosclaw.hub.*"
+follow_imports = "normal"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["mcap", "mcap.*"]
+follow_imports = "skip"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/legacy"]
+pythonpath = ["src", "."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "--import-mode=importlib -p no:launch_ros -p no:launch_testing -p no:ament_pep257 -p no:ament_lint -p no:ament_copyright -p no:ament_flake8 -p no:ament_xmllint -p no:colcon_core -m 'not integration and not deployment'"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as requiring external services (deselect with '-k not integration')",
+    "legacy_rclpy: marks tests that depend on the legacy rclpy-based ROS2 driver layer",
+    "deployment: marks tests that deploy the Docker ROS test stack (deselect with '-m \"not deployment\"')",
+    "rh56_hw: marks tests requiring the physical RH56 hand (ROSCLAW_RH56_HW=1)",
+    "rh56_shadow: marks tests running the RH56 real-body shadow gate",
+    "rh56_execute: marks tests executing on the physical RH56 (also requires ROSCLAW_RH56_EXECUTE_ACK=YES)",
+]

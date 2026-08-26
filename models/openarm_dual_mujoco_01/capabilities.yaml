@@ -1,0 +1,188 @@
+capability_version: "1.0"
+robot_id: openarm_dual_mujoco_01
+
+capabilities:
+  - id: openarm.arm.move_relative
+    name: move_relative
+    category: manipulation
+    description: Move one OpenArm end effector by a bounded Cartesian translation
+    skill_type: programmed
+
+    inputs:
+      - name: arm
+        type: str
+        allowed: [left, right]
+
+      - name: reference_frame
+        type: str
+        allowed: [world]
+        default: world
+
+      - name: translation
+        type: vector3
+        unit: m
+        frame: world
+
+      - name: velocity_scale
+        type: float
+        default: 0.05
+        range: [0.01, 0.10]
+
+      - name: acceleration_scale
+        type: float
+        default: 0.05
+        range: [0.01, 0.10]
+
+      - name: avoid_collisions
+        type: bool
+        default: false
+
+    preconditions:
+      - ros2_action_worker_available
+      - moveit_cartesian_planning_available
+      - moveit_execute_trajectory_available
+      - mujoco_follow_joint_trajectory_available
+      - openarm_moveit_executor_registered
+
+    postconditions:
+      - requested_cartesian_translation_verified
+
+    required_software:
+      - rosclaw
+      - mujoco
+      - ros2_jazzy
+      - moveit2
+
+    constraints:
+      execution_modes: [SIMULATION]
+      allowed_arms: [left, right]
+      allowed_reference_frames: [world]
+      max_abs_translation_component_m: 0.02
+      max_translation_norm_m: 0.02
+      max_final_error_m: 0.0005
+
+    safety:
+      - simulation_only
+      - reject_unknown_arguments
+      - reject_unverified_results
+      - require_moveit_planning_and_execution
+      - forbid_direct_mujoco_fallback
+      - one_active_request_per_arm
+      - fail_closed
+
+  - id: openarm.gripper.move
+    name: gripper_move
+    category: manipulation
+    description: Move one OpenArm parallel gripper to an absolute opening target
+    skill_type: programmed
+
+    inputs:
+      - name: side
+        type: str
+        allowed: [left, right]
+
+      - name: target_m
+        type: float
+        unit: m
+        range: [0.0, 0.044]
+
+      - name: duration_s
+        type: float
+        unit: s
+        default: 2.0
+        range: [0.25, 10.0]
+
+      - name: hold_s
+        type: float
+        unit: s
+        default: 1.0
+        range: [0.0, 10.0]
+
+    preconditions:
+      - ros2_action_worker_available
+      - moveit_gripper_planning_available
+      - moveit_execute_trajectory_available
+      - mujoco_follow_joint_trajectory_available
+      - openarm_gripper_executor_registered
+
+    postconditions:
+      - requested_gripper_target_verified
+      - gripper_mimic_joint_verified
+      - gripper_hold_verified
+
+    required_software:
+      - rosclaw
+      - mujoco
+      - ros2_jazzy
+      - moveit2
+
+    constraints:
+      execution_modes: [SIMULATION]
+      allowed_sides: [left, right]
+      target_range_m: [0.0, 0.044]
+      max_target_error_m: 0.0005
+      max_mimic_error_m: 0.0005
+      max_hold_drift_m: 0.0002
+
+    safety:
+      - simulation_only
+      - reject_unknown_arguments
+      - reject_out_of_range_target_before_dispatch
+      - reject_unverified_results
+      - require_moveit_planning_and_execution
+      - forbid_direct_mujoco_fallback
+      - fail_closed
+
+  - id: openarm.pick_demo
+    name: pick_demo
+    category: manipulation
+    description: Pick and lift one deterministic demo block with the right gripper
+    skill_type: programmed
+
+    inputs:
+      - name: side
+        type: str
+        allowed: [right]
+
+      - name: object_id
+        type: str
+        allowed: [pick_demo_block]
+
+      - name: lift_m
+        type: float
+        unit: m
+        default: 0.015
+        range: [0.010, 0.020]
+
+    preconditions:
+      - openarm_pick_demo_scene_active
+      - object_pose_observation_available
+      - moveit_arm_and_gripper_execution_available
+
+    postconditions:
+      - all_pick_stages_verified
+      - object_height_increase_verified
+
+    required_software:
+      - rosclaw
+      - mujoco
+      - ros2_jazzy
+      - moveit2
+
+    constraints:
+      execution_modes: [SIMULATION]
+      allowed_sides: [right]
+      allowed_objects: [pick_demo_block]
+      lift_range_m: [0.010, 0.020]
+      minimum_verified_object_rise_m: 0.008
+
+    safety:
+      - simulation_only
+      - one_sandbox_request
+      - no_automatic_retry
+      - reject_unknown_arguments
+      - require_dedicated_pick_demo_scene
+      - require_object_pose_evidence
+      - require_moveit_planning_and_execution
+      - forbid_direct_mujoco_fallback
+      - fail_closed

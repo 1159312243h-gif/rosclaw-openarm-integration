@@ -1,0 +1,16 @@
+joint1:
+  origin:
+    x: 0.0
+    y: -0.0334627307176665
+    z: 0.1025
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+joint2:
+  origin:
+    x: 0.0
+    y: 0.0334627307176665
+    z: 0.1025
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0

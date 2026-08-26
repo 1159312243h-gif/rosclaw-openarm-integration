@@ -1,0 +1,6 @@
+#!/bin/bash
+# ROSClaw wrapper — auto-activates the local project venv
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/.venv/bin/activate"
+exec rosclaw "$@"

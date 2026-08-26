@@ -1,0 +1,11 @@
+diff --git a/src/rosclaw_motion/setup.py b/src/rosclaw_motion/setup.py
+--- a/src/rosclaw_motion/setup.py
++++ b/src/rosclaw_motion/setup.py
+@@ -16,6 +16,7 @@ setup(
+     ],
+     install_requires=["setuptools"],
+     zip_safe=True,
++    tests_require=["pytest"],
+     maintainer="hkz",
+     maintainer_email="hkz@example.com",
+     description="Structured relative arm motion server for RosClaw and MoveIt 2.",

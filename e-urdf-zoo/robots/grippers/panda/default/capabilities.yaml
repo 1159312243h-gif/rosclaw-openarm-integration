@@ -1,0 +1,37 @@
+schema_version: e_urdf.capabilities.v1
+capabilities:
+  - id: open_gripper
+    name: Open Gripper
+    scope: manipulation
+    risk: low
+    body_parts:
+      - left_finger
+      - right_finger
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors: []
+    required_calibration: []
+    safety_notes: []
+  - id: close_gripper
+    name: Close Gripper
+    scope: manipulation
+    risk: low
+    body_parts:
+      - left_finger
+      - right_finger
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors:
+      - force_limit_monitor
+    required_calibration: []
+    safety_notes:
+      - Monitor grip force to avoid object damage.
+forbidden_capabilities:
+  - id: forceful_grasp_without_current_limit
+    description: Forceful grasping without active current/torque limit
+    reason: Can damage the gripper and grasped object
+    severity: critical
+    enforcement:
+      policy_block: true
+      sandbox_block: true
+      real_robot_block: true

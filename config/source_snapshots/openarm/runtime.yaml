@@ -1,0 +1,31 @@
+schema_version: rosclaw.runtime.profile.v1
+
+robot:
+  id: openarm_dual_mujoco_01
+  zoo_path: models
+
+workspace:
+  home: .rosclaw
+
+sandbox:
+  engine: mujoco
+  world_id: empty
+  artifact_root: .rosclaw/artifacts/sandbox
+  moveit:
+    required: true
+    worker_command: scripts/run_openarm_moveit_worker.sh
+    action_name: /rosclaw/arm_motion
+    server_timeout_sec: 5.0
+    result_timeout_sec: 30.0
+    cancel_timeout_sec: 3.0
+
+skills:
+  paths:
+    - skills/openarm-move-relative
+
+sense:
+  collector: mock
+  update_hz: 1.0
+
+mcp:
+  transport: stdio

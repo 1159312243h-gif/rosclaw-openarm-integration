@@ -1,0 +1,10 @@
+joint1:
+  axis:
+    x: 0.0
+    y: 1.0
+    z: 0.0
+joint2:
+  axis:
+    x: 0.0
+    y: -1.0
+    z: 0.0

@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""Start MoveIt 2 for the OpenArm MuJoCo bridge on ROS 2 Jazzy."""
+
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import yaml
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+from launch import LaunchDescription, LaunchService
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+WORKSPACE = Path("/home/hkz/openarm_rosclaw/ros_ws")
+MOVEIT_CONFIG_SHARE = Path(get_package_share_directory("openarm_moveit_config"))
+DEFAULT_URDF_PATH = WORKSPACE / "src/openarm_description/output.urdf"
+SRDF_PATH = MOVEIT_CONFIG_SHARE / "srdf/openarm.srdf"
+KINEMATICS_PATH = MOVEIT_CONFIG_SHARE / "config/kinematics.yaml"
+OMPL_PATH = MOVEIT_CONFIG_SHARE / "config/ompl_planning.yaml"
+JOINT_LIMITS_PATH = MOVEIT_CONFIG_SHARE / "config/joint_limits.yaml"
+WORLD_BODY_Z = 0.42
+
+
+def load_text(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required MoveIt file does not exist: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required MoveIt file does not exist: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a YAML mapping in {path}")
+    return data
+
+
+def unwrap(data: dict, key: str) -> dict:
+    """Accept both a raw config mapping and a mapping already under key."""
+    nested = data.get(key)
+    if len(data) == 1 and isinstance(nested, dict):
+        return nested
+    return data
+
+
+def normalize_arm_groups_as_chains(urdf_text: str, srdf_text: str) -> str:
+    """Convert joint-list arm groups to explicit chains for KDL."""
+    urdf_root = ET.fromstring(urdf_text)
+    srdf_root = ET.fromstring(srdf_text)
+
+    urdf_robot_name = urdf_root.get("name", "")
+    srdf_robot_name = srdf_root.get("name", "")
+    if not urdf_robot_name:
+        raise ValueError("URDF root element has no robot name")
+    if srdf_robot_name != urdf_robot_name:
+        print(
+            f"Corrected SRDF robot name: '{srdf_robot_name}' -> "
+            f"'{urdf_robot_name}'"
+        )
+        srdf_root.set("name", urdf_robot_name)
+
+    joint_links = {}
+    for joint in urdf_root.findall("./joint"):
+        parent = joint.find("parent")
+        child = joint.find("child")
+        if parent is None or child is None:
+            continue
+        parent_link = parent.get("link", "")
+        child_link = child.get("link", "")
+        if parent_link and child_link:
+            joint_links[joint.get("name", "")] = (parent_link, child_link)
+
+    for group_name in ("left_arm", "right_arm"):
+        group = srdf_root.find(f"./group[@name='{group_name}']")
+        if group is None:
+            raise ValueError(f"SRDF does not define required group '{group_name}'")
+        if group.find("chain") is not None:
+            continue
+
+        joint_elements = group.findall("joint")
+        joint_names = [element.get("name", "") for element in joint_elements]
+        if not joint_names:
+            raise ValueError(
+                f"SRDF group '{group_name}' has neither a chain nor joint entries"
+            )
+        missing = [name for name in joint_names if name not in joint_links]
+        if missing:
+            raise ValueError(
+                f"Cannot create chain for '{group_name}'; joints absent from URDF: {missing}"
+            )
+
+        base_link = joint_links[joint_names[0]][0]
+        tip_link = joint_links[joint_names[-1]][1]
+        for element in list(group):
+            group.remove(element)
+        ET.SubElement(
+            group,
+            "chain",
+            {"base_link": base_link, "tip_link": tip_link},
+        )
+        print(
+            f"Converted SRDF group '{group_name}' to chain: "
+            f"{base_link} -> {tip_link}"
+        )
+
+    return ET.tostring(srdf_root, encoding="unicode")
+
+
+def set_world_body_mount_height(urdf_text: str) -> str:
+    """Make the robot model use the same world height as MuJoCo."""
+    root = ET.fromstring(urdf_text)
+    mount_joint = None
+    for joint in root.findall("./joint"):
+        child = joint.find("child")
+        if child is not None and child.get("link") == "openarm_body_link0":
+            mount_joint = joint
+            break
+    if mount_joint is None:
+        raise ValueError(
+            "URDF has no joint whose child is 'openarm_body_link0'"
+        )
+
+    origin = mount_joint.find("origin")
+    if origin is None:
+        origin = ET.SubElement(mount_joint, "origin")
+    xyz = [float(value) for value in origin.get("xyz", "0 0 0").split()]
+    if len(xyz) != 3:
+        raise ValueError("Body mount joint origin must contain exactly three XYZ values")
+    xyz[2] = WORLD_BODY_Z
+    origin.set("xyz", " ".join(f"{value:g}" for value in xyz))
+    origin.set("rpy", origin.get("rpy", "0 0 0"))
+    print(
+        "Configured URDF world -> openarm_body_link0 mount height: "
+        f"z={WORLD_BODY_Z:.3f} m"
+    )
+    return ET.tostring(root, encoding="unicode")
+
+
+def resolve_description_resources(urdf_text: str) -> str:
+    """Use source-tree mesh URIs when the description package is not installed."""
+    try:
+        get_package_share_directory("openarm_description")
+        return urdf_text
+    except PackageNotFoundError:
+        source_directory = WORKSPACE / "src/openarm_description"
+        if not source_directory.is_dir():
+            raise FileNotFoundError(
+                "openarm_description is neither installed nor present in the source tree"
+            )
+        source_uri = source_directory.as_uri().rstrip("/") + "/"
+        print(
+            "openarm_description is not installed; resolving package mesh URIs "
+            f"from {source_directory}"
+        )
+        return urdf_text.replace(
+            "package://openarm_description/",
+            source_uri,
+        )
+
+
+def as_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Expected a boolean launch value, got {value!r}")
+
+
+def validate_parallel_gripper_urdf(urdf_text: str) -> None:
+    root = ET.fromstring(urdf_text)
+    joints = {joint.get("name", ""): joint for joint in root.findall("./joint")}
+    # The parallel mount's Rx(pi) transform is collapsed into each finger joint.
+    expected_axes = {1: (0.0, 1.0, 0.0), 2: (0.0, -1.0, 0.0)}
+    for side in ("left", "right"):
+        driver_name = f"openarm_{side}_finger_joint1"
+        follower_name = f"openarm_{side}_finger_joint2"
+        for number, name in ((1, driver_name), (2, follower_name)):
+            joint = joints.get(name)
+            if joint is None:
+                raise ValueError(f"Candidate URDF is missing {name}")
+            if joint.get("type") != "prismatic":
+                raise ValueError(
+                    f"Candidate URDF {name} must be prismatic, "
+                    f"got {joint.get('type')!r}"
+                )
+            axis = tuple(
+                float(value)
+                for value in joint.find("axis").get("xyz", "").split()
+            )
+            if axis != expected_axes[number]:
+                raise ValueError(
+                    f"Candidate URDF {name} axis is {axis}, "
+                    f"expected {expected_axes[number]}"
+                )
+            limit = joint.find("limit")
+            if limit is None:
+                raise ValueError(f"Candidate URDF {name} has no limit")
+            lower = float(limit.get("lower", "nan"))
+            upper = float(limit.get("upper", "nan"))
+            if abs(lower) > 1e-12 or abs(upper - 0.044) > 1e-12:
+                raise ValueError(
+                    f"Candidate URDF {name} range is [{lower}, {upper}], "
+                    "expected [0.0, 0.044] m"
+                )
+
+        mimic = joints[follower_name].find("mimic")
+        if mimic is None:
+            raise ValueError(f"Candidate URDF {follower_name} has no mimic")
+        if mimic.get("joint") != driver_name:
+            raise ValueError(
+                f"Candidate URDF {follower_name} mimics "
+                f"{mimic.get('joint')!r}, expected {driver_name!r}"
+            )
+        multiplier = float(mimic.get("multiplier", "1"))
+        offset = float(mimic.get("offset", "0"))
+        if abs(multiplier - 1.0) > 1e-12 or abs(offset) > 1e-12:
+            raise ValueError(
+                f"Candidate URDF {follower_name} mimic must use "
+                f"multiplier=1 and offset=0, got {multiplier}/{offset}"
+            )
+
+
+def controller_parameters(enable_gripper_controllers: bool) -> dict:
+    controller_names = ["left_arm_controller", "right_arm_controller"]
+    controllers = {
+        "left_arm_controller": {
+            "action_ns": "follow_joint_trajectory",
+            "type": "FollowJointTrajectory",
+            "default": True,
+            "joints": [f"openarm_left_joint{index}" for index in range(1, 8)],
+        },
+        "right_arm_controller": {
+            "action_ns": "follow_joint_trajectory",
+            "type": "FollowJointTrajectory",
+            "default": True,
+            "joints": [f"openarm_right_joint{index}" for index in range(1, 8)],
+        },
+    }
+    if enable_gripper_controllers:
+        controller_names.extend(
+            ["left_gripper_controller", "right_gripper_controller"]
+        )
+        controllers.update(
+            {
+                "left_gripper_controller": {
+                    "action_ns": "follow_joint_trajectory",
+                    "type": "FollowJointTrajectory",
+                    "default": True,
+                    "joints": ["openarm_left_finger_joint1"],
+                },
+                "right_gripper_controller": {
+                    "action_ns": "follow_joint_trajectory",
+                    "type": "FollowJointTrajectory",
+                    "default": True,
+                    "joints": ["openarm_right_finger_joint1"],
+                },
+            }
+        )
+
+    return {
+        "moveit_controller_manager": (
+            "moveit_simple_controller_manager/MoveItSimpleControllerManager"
+        ),
+        "moveit_manage_controllers": False,
+        "moveit_simple_controller_manager": {
+            "controller_names": controller_names,
+            **controllers,
+        },
+    }
+
+
+def launch_setup(context):
+    urdf_path = Path(
+        LaunchConfiguration("robot_description_path").perform(context)
+    ).expanduser().resolve()
+    enable_grippers = as_bool(
+        LaunchConfiguration("enable_gripper_controllers").perform(context)
+    )
+    source_urdf = load_text(urdf_path)
+    if enable_grippers:
+        validate_parallel_gripper_urdf(source_urdf)
+    robot_description = set_world_body_mount_height(
+        resolve_description_resources(source_urdf)
+    )
+    robot_description_semantic = normalize_arm_groups_as_chains(
+        robot_description,
+        load_text(SRDF_PATH),
+    )
+    kinematics = unwrap(load_yaml(KINEMATICS_PATH), "robot_description_kinematics")
+    joint_limits = unwrap(load_yaml(JOINT_LIMITS_PATH), "robot_description_planning")
+    ompl = unwrap(load_yaml(OMPL_PATH), "ompl")
+    ompl.setdefault("planning_plugin", "ompl_interface/OMPLPlanner")
+    if enable_grippers:
+        for group_name, joint_name in (
+            ("left_gripper", "openarm_left_finger_joint1"),
+            ("right_gripper", "openarm_right_finger_joint1"),
+        ):
+            ompl.setdefault(
+                group_name,
+                {
+                    "default_planner_config": "RRTConnect",
+                    "planner_configs": ["RRTConnect"],
+                    "projection_evaluator": f"joints({joint_name})",
+                    "longest_valid_segment_fraction": 0.01,
+                },
+            )
+
+    robot_parameters = {
+        "robot_description": robot_description,
+        "robot_description_semantic": robot_description_semantic,
+        "robot_description_kinematics": kinematics,
+        "robot_description_planning": joint_limits,
+    }
+
+    planning_parameters = {
+        "planning_pipelines": ["ompl"],
+        "default_planning_pipeline": "ompl",
+        "ompl": ompl,
+        "allow_trajectory_execution": True,
+        "publish_planning_scene": True,
+        "publish_geometry_updates": True,
+        "publish_state_updates": True,
+        "publish_transforms_updates": True,
+        "publish_robot_description": True,
+        "publish_robot_description_semantic": True,
+        "start_state_max_bounds_error": 0.1,
+        "trajectory_execution.allowed_execution_duration_scaling": 1.5,
+        # The bridge owns a 5 s post-trajectory convergence deadline. MoveIt
+        # must not cancel the controller before that deadline can be reported.
+        "trajectory_execution.allowed_goal_duration_margin": 6.0,
+        "trajectory_execution.allowed_start_tolerance": 0.05,
+        "trajectory_execution.execution_duration_monitoring": True,
+    }
+
+    moveit_controllers = controller_parameters(enable_grippers)
+
+    state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        name="robot_state_publisher",
+        output="screen",
+        parameters=[{"robot_description": robot_description}],
+    )
+
+    move_group = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        output="screen",
+        parameters=[
+            robot_parameters,
+            planning_parameters,
+            moveit_controllers,
+            {
+                "rosclaw_robot_description_path": str(urdf_path),
+                "rosclaw_gripper_candidate_mode": enable_grippers,
+            },
+        ],
+    )
+
+    print(f"MoveIt robot description: {urdf_path}")
+    print(f"MoveIt gripper controllers enabled: {enable_grippers}")
+    return [state_publisher, move_group]
+
+
+def generate_launch_description() -> LaunchDescription:
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "robot_description_path",
+                default_value=str(DEFAULT_URDF_PATH),
+            ),
+            DeclareLaunchArgument(
+                "enable_gripper_controllers",
+                default_value="false",
+            ),
+            OpaqueFunction(function=launch_setup),
+        ]
+    )
+
+
+def main() -> None:
+    launch_service = LaunchService()
+    launch_service.include_launch_description(generate_launch_description())
+    try:
+        launch_service.run()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,150 @@
+# Crazyflie 2.1 Benchmark Configuration — Physical DNA Benchmark Layer
+# For Darwin / EEIB evaluation and regression testing
+
+benchmark_version: "1.0"
+robot_id: crazyflie_2_1
+
+# ── Flight Performance Benchmarks ──
+flight_benchmarks:
+  - name: hover_stability
+    description: "Position hold accuracy in hover"
+    target: 0.05
+    unit: m
+    duration: 30.0
+  - name: max_horizontal_speed
+    description: "Maximum achievable horizontal speed"
+    target: 2.0
+    unit: m/s
+  - name: max_climb_rate
+    description: "Maximum vertical climb rate"
+    target: 1.0
+    unit: m/s
+  - name: flight_time
+    description: "Total flight time on full battery"
+    target: 420.0
+    unit: s
+  - name: payload_capacity
+    description: "Maximum additional payload mass"
+    target: 0.015
+    unit: kg
+
+# ── Navigation Benchmarks ──
+navigation_benchmarks:
+  - name: waypoint_accuracy
+    description: "Waypoint navigation accuracy using flow deck"
+    target: 0.1
+    unit: m
+  - name: wall_following_accuracy
+    description: "Distance maintenance during wall following"
+    target: 0.05
+    unit: m
+  - name: obstacle_avoidance_reaction_time
+    description: "Time to react to detected obstacle"
+    target: 0.05
+    unit: s
+
+# ── Swarm Benchmarks ──
+swarm_benchmarks:
+  - name: swarm_formation_accuracy
+    description: "Formation position accuracy in swarm"
+    target: 0.1
+    unit: m
+  - name: inter_drone_collision_rate
+    description: "Collision rate between swarm members"
+    target: 0.0
+  - name: max_swarm_size_stable
+    description: "Maximum swarm size with stable communication"
+    target: 49
+
+# ── Simulation Benchmarks ──
+simulation_benchmarks:
+  mujoco:
+    - name: real_time_factor
+      target: 1.0
+      tolerance: 0.05
+    - name: aerodynamic_stability
+      description: "Stable hover without drift in 30s simulation"
+      target: true
+    - name: rotor_dynamics_accuracy
+      description: "Thrust response matches physical model"
+      target: 0.95
+
+  isaac:
+    - name: real_time_factor
+      target: 1.0
+      tolerance: 0.1
+    - name: gpu_physics_speedup
+      target: 50.0
+      description: "Speedup vs CPU physics for 1000 parallel envs"
+
+# ── Task Benchmarks (Darwin-style) ──
+task_benchmarks:
+  - name: swarm_hover_10
+    description: "10 drones hovering in formation for 60 seconds"
+    tasks:
+      - swarm_flight
+    metrics:
+      - name: formation_accuracy
+        target: 0.1
+        unit: m
+      - name: collision_count
+        target: 0
+      - name: communication_dropouts
+        target: 0
+
+  - name: indoor_waypoint_5
+    description: "Navigate through 5 indoor waypoints"
+    tasks:
+      - indoor_navigation
+    metrics:
+      - name: success_rate
+        target: 0.95
+      - name: position_error
+        target: 0.1
+        unit: m
+      - name: wall_collision_count
+        target: 0
+
+  - name: education_demo_sequence
+    description: "Execute hover, circle, and figure8 demos"
+    tasks:
+      - education_demo
+    metrics:
+      - name: success_rate
+        target: 0.98
+      - name: trajectory_accuracy
+        target: 0.05
+        unit: m
+
+  - name: light_show_5min
+    description: "Run LED light show for 5 minutes"
+    tasks:
+      - light_show
+    metrics:
+      - name: pattern_accuracy
+        target: 0.99
+      - name: sync_accuracy
+        target: 0.95
+
+# ── Safety Benchmarks ──
+safety_benchmarks:
+  - name: emergency_landing_time
+    description: "Time from emergency trigger to ground contact"
+    target: 3.0
+    unit: s
+  - name: wall_avoidance_success
+    description: "Success rate avoiding unexpected walls"
+    target: 0.99
+  - name: low_battery_landing
+    description: "Safe landing triggered at low battery"
+    target: true
+
+# ── Baseline Hardware ──
+baseline_hardware:
+  cpu: "Intel i7-12700"
+  gpu: "NVIDIA RTX 3080"
+  ram: "32GB DDR4"
+  os: "Ubuntu 22.04"
+  ros_distro: "humble"
+  realtime_kernel: false
+  radio_dongle: "crazyradio_pa"

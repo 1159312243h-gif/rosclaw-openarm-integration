@@ -1,0 +1,321 @@
+# ROSClaw Extended URDF (e-URDF) — Bitcraze Crazyflie 2.1
+# Physical DNA Registry Entry
+# https://www.bitcraze.io/products/crazyflie-2-1/
+
+robot_id: crazyflie_2_1
+name: Crazyflie 2.1
+vendor: Bitcraze
+version: "2.1"
+description: >
+  Nano quadcopter drone with 4 rotors, ~27g mass, 7-minute flight time.
+  Open-source platform designed for swarm robotics, education, and
+  indoor research. Expandable with decks for optical flow, ranging,
+  and LED effects.
+
+# ── Kinematics ──
+dof: 6
+links:
+  - name: base_link
+    type: base
+    mass: 0.027
+    inertia:
+      ixx: 1.4e-5
+      iyy: 1.4e-5
+      izz: 2.2e-5
+  - name: arm_front_left
+    type: link
+    mass: 0.001
+  - name: arm_front_right
+    type: link
+    mass: 0.001
+  - name: arm_rear_left
+    type: link
+    mass: 0.001
+  - name: arm_rear_right
+    type: link
+    mass: 0.001
+  - name: propeller_fl
+    type: end_effector
+    mass: 0.0003
+  - name: propeller_fr
+    type: end_effector
+    mass: 0.0003
+  - name: propeller_rl
+    type: end_effector
+    mass: 0.0003
+  - name: propeller_rr
+    type: end_effector
+    mass: 0.0003
+
+joints:
+  - name: arm_fl_joint
+    type: fixed
+    parent: base_link
+    child: arm_front_left
+    origin:
+      xyz: [0.023, 0.023, 0.0]
+  - name: arm_fr_joint
+    type: fixed
+    parent: base_link
+    child: arm_front_right
+    origin:
+      xyz: [0.023, -0.023, 0.0]
+  - name: arm_rl_joint
+    type: fixed
+    parent: base_link
+    child: arm_rear_left
+    origin:
+      xyz: [-0.023, 0.023, 0.0]
+  - name: arm_rr_joint
+    type: fixed
+    parent: base_link
+    child: arm_rear_right
+    origin:
+      xyz: [-0.023, -0.023, 0.0]
+  - name: motor_fl_joint
+    type: continuous
+    parent: arm_front_left
+    child: propeller_fl
+    axis: [0, 0, 1]
+    limits:
+      velocity: 3141.6  # rad/s (~30000 RPM)
+      effort: 0.05
+  - name: motor_fr_joint
+    type: continuous
+    parent: arm_front_right
+    child: propeller_fr
+    axis: [0, 0, 1]
+    limits:
+      velocity: 3141.6
+      effort: 0.05
+  - name: motor_rl_joint
+    type: continuous
+    parent: arm_rear_left
+    child: propeller_rl
+    axis: [0, 0, 1]
+    limits:
+      velocity: 3141.6
+      effort: 0.05
+  - name: motor_rr_joint
+    type: continuous
+    parent: arm_rear_right
+    child: propeller_rr
+    axis: [0, 0, 1]
+    limits:
+      velocity: 3141.6
+      effort: 0.05
+
+# ── Sensors ──
+sensors:
+  - name: imu
+    type: imu
+    parent_link: base_link
+    noise_std:
+      accel: 0.05
+      gyro: 0.005
+      mag: 0.001
+  - name: flow_deck
+    type: optical_flow
+    parent_link: base_link
+    origin:
+      xyz: [0, 0, -0.005]
+      rpy: [0, 0, 0]
+    resolution: [35, 35]
+    fov: 42.0
+    range: [0.03, 1.0]
+    update_rate: 100.0
+    noise_std: 0.01
+  - name: multi_ranger_front
+    type: range
+    parent_link: base_link
+    origin:
+      xyz: [0.04, 0, 0]
+      rpy: [0, 0, 0]
+    range: [0.02, 4.0]
+    update_rate: 50.0
+    noise_std: 0.005
+  - name: multi_ranger_back
+    type: range
+    parent_link: base_link
+    origin:
+      xyz: [-0.04, 0, 0]
+      rpy: [0, 0, 3.14159]
+    range: [0.02, 4.0]
+    update_rate: 50.0
+    noise_std: 0.005
+  - name: multi_ranger_left
+    type: range
+    parent_link: base_link
+    origin:
+      xyz: [0, 0.04, 0]
+      rpy: [0, 0, 1.5708]
+    range: [0.02, 4.0]
+    update_rate: 50.0
+    noise_std: 0.005
+  - name: multi_ranger_right
+    type: range
+    parent_link: base_link
+    origin:
+      xyz: [0, -0.04, 0]
+      rpy: [0, 0, -1.5708]
+    range: [0.02, 4.0]
+    update_rate: 50.0
+    noise_std: 0.005
+  - name: barometer
+    type: altimeter
+    parent_link: base_link
+    noise_std: 0.05
+    range: [0, 100]
+  - name: led_deck
+    type: led_array
+    parent_link: base_link
+    led_count: 12
+    colors: [red, green, blue, white]
+
+# ── Actuators ──
+actuators:
+  - name: motor_fl
+    type: coreless_motor
+    joint: motor_fl_joint
+    max_rpm: 30000
+    kv_rating: 14000
+    max_current: 3.0
+    control_mode: [velocity, thrust]
+    thrust_coefficient: 2.5e-8
+  - name: motor_fr
+    type: coreless_motor
+    joint: motor_fr_joint
+    max_rpm: 30000
+    kv_rating: 14000
+    max_current: 3.0
+    control_mode: [velocity, thrust]
+    thrust_coefficient: 2.5e-8
+  - name: motor_rl
+    type: coreless_motor
+    joint: motor_rl_joint
+    max_rpm: 30000
+    kv_rating: 14000
+    max_current: 3.0
+    control_mode: [velocity, thrust]
+    thrust_coefficient: 2.5e-8
+  - name: motor_rr
+    type: coreless_motor
+    joint: motor_rr_joint
+    max_rpm: 30000
+    kv_rating: 14000
+    max_current: 3.0
+    control_mode: [velocity, thrust]
+    thrust_coefficient: 2.5e-8
+
+# ── Safety Limits ──
+safety_limits:
+  velocity_limits:
+    max_horizontal_speed: 2.0
+    max_vertical_speed: 1.0
+    max_angular_rate: 6.28
+  altitude_limits:
+    max_agl: 10.0
+  geofence:
+    type: cylinder
+    radius: 50.0
+    height_max: 10.0
+  battery_limits:
+    min_voltage: 3.0
+    max_voltage: 4.2
+    min_capacity_percent: 10.0
+  motor_limits:
+    max_rpm: 30000
+    max_temperature: 60.0
+  collision_avoidance:
+    enabled: true
+    min_distance: 0.3
+    reaction_time_ms: 50.0
+
+# ── Capabilities ──
+capabilities:
+  - name: swarm_flight
+    type: aerial
+    skill_type: programmed
+    parameters:
+      swarm_size: {type: int, default: 4}
+      formation: {type: str, enum: [line, circle, grid, random], default: circle}
+      separation: {type: float, default: 0.5, unit: m}
+    sensors_used: [imu, flow_deck]
+  - name: indoor_navigation
+    type: aerial
+    skill_type: programmed
+    parameters:
+      waypoints: {type: list, description: "List of local waypoints"}
+      speed: {type: float, default: 0.5, unit: m/s}
+      avoid_walls: {type: bool, default: true}
+    sensors_used: [flow_deck, multi_ranger_front, multi_ranger_back, multi_ranger_left, multi_ranger_right]
+  - name: education_demo
+    type: aerial
+    skill_type: programmed
+    parameters:
+      demo_type: {type: str, enum: [hover, circle, figure8, flip], default: hover}
+      duration: {type: float, default: 10.0, unit: s}
+    sensors_used: [imu, flow_deck]
+  - name: light_show
+    type: display
+    skill_type: programmed
+    parameters:
+      pattern: {type: str, enum: [rainbow, pulse, chase, solid], default: rainbow}
+      color: {type: str, default: "white"}
+      speed: {type: float, default: 1.0}
+    sensors_used: [led_deck]
+
+# ── Simulation Backends ──
+simulation_backends:
+  mujoco:
+    model_file: robot.mjcf.xml
+    timestep: 0.001
+    integrator: implicitfast
+    solver: newton
+    iterations: 50
+    ls_iterations: 10
+    gravity: [0, 0, -9.81]
+    contact:
+      friction: [0.5, 0.005, 0.0001]
+      solref: [0.02, 1.0]
+      solimp: [0.9, 0.95, 0.001]
+  isaac:
+    model_file: robot.urdf
+    stage_units: meters
+    physics_dt: 0.00833
+    rendering_dt: 0.01667
+    gpu_physics: true
+  gazebo:
+    model_file: robot.urdf
+    physics_engine: ode
+    max_step_size: 0.001
+    real_time_factor: 1.0
+
+# ── Semantic Tags ──
+semantic_tags:
+  - quadcopter
+  - nano_drone
+  - swarm
+  - indoor
+  - education
+  - research
+  - open_source
+  - expandable
+  - lightweight
+
+# ── Metadata ──
+metadata:
+  urdf_version: "1.0"
+  ros2_package: crazyflie_2_description
+  flight_controller: crazyflie_stm32f405
+  propeller_diameter: 0.046
+  max_flight_time_min: 7
+  max_range_m: 100
+  radio_protocol: crpa
+  deck_compatibility:
+    - flow_deck_v2
+    - multi_ranger_deck
+    - led_deck
+    - lighthouse_deck
+    - loco_deck
+  certification: [CE, FCC]

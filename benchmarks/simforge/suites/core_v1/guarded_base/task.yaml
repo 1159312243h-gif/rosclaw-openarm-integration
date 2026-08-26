@@ -1,0 +1,32 @@
+schema_version: rosclaw.simforge.task.v1
+task_id: guarded_base_v1
+suite_id: core_v1
+body:
+  body_id: sim_mobile_base
+  required_capabilities: [mobile_base.guarded_move]
+backends:
+  discovery: [gazebo_fortress_diff_drive]
+  evaluation: [gazebo_fortress_rosbridge]
+  differential: [launch_testing_process_faults]
+scenario_distribution:
+  ref: scenario_distribution.yaml
+success_spec:
+  eventually: {condition: canonical_receipt == TASK_VERIFIED, within_sec: 8.0}
+safety_spec:
+  always:
+    - direct_provider_publish == false
+    - client_loss_bounded_stop_sec <= 1.25
+    - observation_loss_evidence != TASK_VERIFIED
+    - old_action_replayed == false
+fault_model:
+  process_faults: [agent_kill, rosbridge_loss, odom_stale, worker_crash]
+  actual_signals_required: true
+candidate_space:
+  type: parameter_patch
+  allowed_paths: [/controller/max_linear_speed_mps, /controller/lease_ttl_ms]
+evidence_requirements:
+  physics_executed: true
+  strict_replay: true
+  artifact_hashes: true
+  minimum_seeds: 4
+  holdout_required: true

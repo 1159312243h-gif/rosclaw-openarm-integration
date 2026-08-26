@@ -1,0 +1,136 @@
+<mujoco model="skydio_x2">
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.001" integrator="implicitfast">
+    <flag warmstart="enable"/>
+  </option>
+
+  <default>
+    <default class="skydio_x2">
+      <geom rgba="0.3 0.3 0.35 1" material="body_mat"/>
+      <joint armature="0.001" damping="0.01"/>
+      <site size="0.01" rgba="1 0 0 0.3"/>
+    </default>
+    <default class="propeller">
+      <geom type="cylinder" size="0.125 0.005" rgba="0.1 0.1 0.1 1"/>
+      <joint type="hinge" axis="0 0 1" damping="0.001"/>
+    </default>
+    <default class="arm">
+      <geom type="capsule" size="0.008" rgba="0.4 0.4 0.45 1"/>
+    </default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
+  </default>
+
+  <asset>
+    <material name="body_mat" specular="0.5" shininess="0.25" rgba="0.3 0.3 0.35 1"/>
+    <material name="prop_mat" specular="0.3" shininess="0.1" rgba="0.1 0.1 0.1 1"/>
+    <material name="arm_mat" specular="0.4" shininess="0.2" rgba="0.4 0.4 0.45 1"/>
+    <material name="camera_mat" specular="0.8" shininess="0.5" rgba="0.1 0.1 0.15 1"/>
+    <material name="led_mat" emission="1.0" rgba="0.0 0.8 0.0 1"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2" pos="0 0 5" dir="0 0 -1"/>
+    <light directional="true" diffuse=".3 .3 .3" specular=".1 .1 .1" pos="5 0 3" dir="-1 0 -0.5"/>
+
+    <body name="skydio_x2" pos="0 0 1.0" childclass="skydio_x2">
+      <!-- Free joint for 6-DOF movement -->
+      <freejoint name="root"/>
+
+      <!-- Central fuselage -->
+      <inertial mass="1.1" pos="0 0 0" diaginertia="0.012 0.012 0.022"/>
+      <geom name="fuselage" type="box" size="0.08 0.06 0.04" class="visual"/>
+      <geom name="fuselage_collision" type="box" size="0.08 0.06 0.04" class="collision"/>
+
+      <!-- Front camera housing -->
+      <geom name="front_camera" type="box" pos="0.075 0 0.01" size="0.02 0.03 0.015" rgba="0.1 0.1 0.15 1" class="visual"/>
+      <geom name="rear_camera" type="box" pos="-0.075 0 0.01" size="0.02 0.03 0.015" rgba="0.1 0.1 0.15 1" class="visual"/>
+      <geom name="left_camera" type="box" pos="0 0.055 0.01" size="0.015 0.015 0.015" rgba="0.1 0.1 0.15 1" class="visual"/>
+      <geom name="right_camera" type="box" pos="0 -0.055 0.01" size="0.015 0.015 0.015" rgba="0.1 0.1 0.15 1" class="visual"/>
+
+      <!-- Status LED -->
+      <geom name="status_led" type="sphere" pos="0 0 0.045" size="0.005" material="led_mat" class="visual"/>
+
+      <!-- Front-left arm -->
+      <body name="arm_fl" pos="0.08 0.06 0">
+        <geom name="arm_fl_geom" fromto="0 0 0 0.10 0.10 0" class="arm"/>
+        <body name="motor_fl" pos="0.10 0.10 0.01">
+          <geom name="motor_fl_housing" type="cylinder" size="0.015 0.01" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_fl_joint" class="propeller"/>
+          <geom name="prop_fl" type="cylinder" size="0.125 0.003" pos="0 0 0.005" material="prop_mat" class="visual"/>
+          <geom name="prop_fl_collision" type="cylinder" size="0.125 0.003" pos="0 0 0.005" class="collision"/>
+          <site name="thrust_fl" pos="0 0 0.01" size="0.01"/>
+        </body>
+      </body>
+
+      <!-- Front-right arm -->
+      <body name="arm_fr" pos="0.08 -0.06 0">
+        <geom name="arm_fr_geom" fromto="0 0 0 0.10 -0.10 0" class="arm"/>
+        <body name="motor_fr" pos="0.10 -0.10 0.01">
+          <geom name="motor_fr_housing" type="cylinder" size="0.015 0.01" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_fr_joint" class="propeller"/>
+          <geom name="prop_fr" type="cylinder" size="0.125 0.003" pos="0 0 0.005" material="prop_mat" class="visual"/>
+          <geom name="prop_fr_collision" type="cylinder" size="0.125 0.003" pos="0 0 0.005" class="collision"/>
+          <site name="thrust_fr" pos="0 0 0.01" size="0.01"/>
+        </body>
+      </body>
+
+      <!-- Rear-left arm -->
+      <body name="arm_rl" pos="-0.08 0.06 0">
+        <geom name="arm_rl_geom" fromto="0 0 0 -0.10 0.10 0" class="arm"/>
+        <body name="motor_rl" pos="-0.10 0.10 0.01">
+          <geom name="motor_rl_housing" type="cylinder" size="0.015 0.01" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_rl_joint" class="propeller"/>
+          <geom name="prop_rl" type="cylinder" size="0.125 0.003" pos="0 0 0.005" material="prop_mat" class="visual"/>
+          <geom name="prop_rl_collision" type="cylinder" size="0.125 0.003" pos="0 0 0.005" class="collision"/>
+          <site name="thrust_rl" pos="0 0 0.01" size="0.01"/>
+        </body>
+      </body>
+
+      <!-- Rear-right arm -->
+      <body name="arm_rr" pos="-0.08 -0.06 0">
+        <geom name="arm_rr_geom" fromto="0 0 0 -0.10 -0.10 0" class="arm"/>
+        <body name="motor_rr" pos="-0.10 -0.10 0.01">
+          <geom name="motor_rr_housing" type="cylinder" size="0.015 0.01" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_rr_joint" class="propeller"/>
+          <geom name="prop_rr" type="cylinder" size="0.125 0.003" pos="0 0 0.005" material="prop_mat" class="visual"/>
+          <geom name="prop_rr_collision" type="cylinder" size="0.125 0.003" pos="0 0 0.005" class="collision"/>
+          <site name="thrust_rr" pos="0 0 0.01" size="0.01"/>
+        </body>
+      </body>
+
+      <!-- IMU site -->
+      <site name="imu" pos="0 0 0" size="0.005" rgba="1 0 0 0.5"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Motor actuators: thrust control -->
+    <motor name="motor_fl" joint="motor_fl_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 15"/>
+    <motor name="motor_fr" joint="motor_fr_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 15"/>
+    <motor name="motor_rl" joint="motor_rl_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 15"/>
+    <motor name="motor_rr" joint="motor_rr_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 15"/>
+  </actuator>
+
+  <sensor>
+    <!-- IMU sensors -->
+    <accelerometer name="imu_accel" site="imu"/>
+    <gyro name="imu_gyro" site="imu"/>
+    <framequat name="imu_quat" objtype="site" objname="imu"/>
+
+    <!-- Motor velocity sensors -->
+    <jointvel name="motor_fl_vel" joint="motor_fl_joint"/>
+    <jointvel name="motor_fr_vel" joint="motor_fr_joint"/>
+    <jointvel name="motor_rl_vel" joint="motor_rl_joint"/>
+    <jointvel name="motor_rr_vel" joint="motor_rr_joint"/>
+  </sensor>
+
+  <keyframe>
+    <key name="hover" qpos="0 0 1.0 1 0 0 0 0 0 0 0" ctrl="3.25 3.25 3.25 3.25"/>
+  </keyframe>
+</mujoco>

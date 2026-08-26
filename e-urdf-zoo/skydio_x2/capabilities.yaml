@@ -1,0 +1,208 @@
+capability_version: '1.0'
+robot_id: skydio_x2
+
+capabilities:
+- id: skydio_aerial_surveillance
+  name: aerial_surveillance
+  category: aerial
+  description: Autonomous aerial surveillance and area monitoring
+  skill_type: programmed
+  skill_package: skydio_aerial
+  inputs:
+  - name: area
+    type: polygon
+    description: Survey area boundary as list of GPS coordinates
+  - name: altitude
+    type: float
+    default: 50.0
+    unit: m
+    range: [10, 120]
+  - name: overlap
+    type: float
+    default: 0.8
+    range: [0.5, 0.95]
+  - name: pattern
+    type: str
+    enum: [grid, spiral, lawnmower]
+    default: lawnmower
+  preconditions:
+  - gps_lock
+  - battery_above_20_percent
+  - no_fly_zone_clear
+  postconditions:
+  - survey_complete
+  required_sensors:
+  - front_stereo_camera
+  - rear_stereo_camera
+  - gps
+  estimated_duration:
+    mean: 1200.0
+    std: 300.0
+    unit: s
+  success_metrics:
+  - name: coverage_percent
+    target: 0.95
+  - name: image_quality
+    target: 0.9
+  failure_modes:
+  - name: gps_loss
+    symptoms:
+    - gps_signal_weak
+    recovery: abort_and_RTL
+  - name: low_battery
+    symptoms:
+    - capacity_below_20
+    recovery: abort_and_RTL
+  constraints:
+    max_altitude: 120.0
+    max_range_from_home: 1000.0
+    requires_gps: true
+
+- id: skydio_waypoint_navigation
+  name: waypoint_navigation
+  category: aerial
+  description: Navigate through a series of GPS waypoints
+  skill_type: programmed
+  skill_package: skydio_aerial
+  inputs:
+  - name: waypoints
+    type: list
+    description: List of GPS waypoints [lat, lon, alt]
+  - name: speed
+    type: float
+    default: 10.0
+    unit: m/s
+    range: [1, 25]
+  - name: hover_time
+    type: float
+    default: 0.0
+    unit: s
+  preconditions:
+  - gps_lock
+  - battery_above_20_percent
+  postconditions:
+  - waypoints_visited
+  required_sensors:
+  - gps
+  - imu
+  - front_stereo_camera
+  estimated_duration:
+    mean: 300.0
+    unit: s
+
+- id: skydio_object_tracking
+  name: object_tracking
+  category: perception
+  description: Autonomously track and follow a detected object
+  skill_type: autonomous
+  skill_package: skydio_perception
+  inputs:
+  - name: target_class
+    type: str
+    description: Object class to track (person, vehicle, etc.)
+  - name: min_confidence
+    type: float
+    default: 0.7
+    range: [0.5, 1.0]
+  - name: follow_distance
+    type: float
+    default: 10.0
+    unit: m
+    range: [5, 50]
+  - name: follow_mode
+    type: str
+    enum: [orbit, follow, lead]
+    default: follow
+  preconditions:
+  - camera_active
+  - target_visible
+  postconditions:
+  - target_tracked
+  required_sensors:
+  - front_stereo_camera
+  - imu
+  estimated_duration:
+    mean: 600.0
+    unit: s
+  success_metrics:
+  - name: tracking_accuracy
+    target: 0.9
+  - name: target_visibility
+    target: 0.8
+
+- id: skydio_photogrammetry
+  name: photogrammetry
+  category: aerial
+  description: Capture overlapping imagery for 3D reconstruction
+  skill_type: composed
+  skill_package: skydio_aerial
+  inputs:
+  - name: area
+    type: polygon
+  - name: gsd
+    type: float
+    default: 0.01
+    unit: m/pixel
+    range: [0.001, 0.1]
+  - name: overlap
+    type: float
+    default: 0.8
+    range: [0.7, 0.95]
+  - name: sidelap
+    type: float
+    default: 0.7
+  preconditions:
+  - gps_lock
+  - camera_active
+  - battery_above_30_percent
+  postconditions:
+  - images_captured
+  required_sensors:
+  - front_stereo_camera
+  - rear_stereo_camera
+  - gps
+  estimated_duration:
+    mean: 1800.0
+    unit: s
+  success_metrics:
+  - name: image_overlap
+    target: 0.8
+  - name: gsd_achieved
+    target: 0.01
+    unit: m/pixel
+
+skill_registry:
+  skydio_aerial:
+    version: '1.0'
+    skills:
+    - aerial_surveillance
+    - waypoint_navigation
+    - photogrammetry
+    - orbit
+    - return_to_launch
+  skydio_perception:
+    version: '1.0'
+    skills:
+    - object_tracking
+    - object_detection
+    - obstacle_avoidance
+
+precondition_checks:
+  gps_lock:
+    check: sensors.gps.satellites >= 8
+    description: GPS must have at least 8 satellite lock
+  battery_above_20_percent:
+    check: battery.capacity_percent >= 20.0
+    description: Battery must be above 20%
+  battery_above_30_percent:
+    check: battery.capacity_percent >= 30.0
+    description: Battery must be above 30%
+  camera_active:
+    check: sensors.front_stereo_camera.status == ACTIVE
+    description: Front camera must be active
+  target_visible:
+    check: perception.target.confidence >= 0.7
+    description: Target must be visible with confidence >= 0.7
+  no_fly_zone_clear:
+    check: geofence.in_no_fly_zone == false
+    description: Must not be in a no-fly zone

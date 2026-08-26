@@ -1,0 +1,85 @@
+schema_version: e_urdf.capabilities.v1
+capabilities:
+  - id: open_hand
+    name: Open Hand
+    scope: manipulation
+    risk: low
+    body_parts:
+      - thumb
+      - index
+      - middle
+      - ring
+      - little
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors: []
+    required_calibration: []
+    safety_notes:
+      - Low-risk reset pose.
+  - id: close_hand_slowly
+    name: Close Hand Slowly
+    scope: manipulation
+    risk: medium
+    body_parts:
+      - thumb
+      - index
+      - middle
+      - ring
+      - little
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors:
+      - current_limit_monitor
+    required_calibration: []
+    safety_notes:
+      - Use reduced speed and current limits.
+  - id: ok_gesture
+    name: OK Gesture
+    scope: manipulation
+    risk: medium
+    body_parts:
+      - thumb
+      - index
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors:
+      - joint_limit_monitor
+    required_calibration:
+      - finger_calibration
+    safety_notes:
+      - Requires calibrated thumb-index contact margin.
+  - id: countdown_gesture
+    name: Countdown Gesture
+    scope: manipulation
+    risk: medium
+    body_parts:
+      - thumb
+      - index
+      - middle
+      - ring
+      - little
+    sandbox_required: true
+    real_robot_execution_allowed: false
+    required_runtime_monitors:
+      - joint_limit_monitor
+    required_calibration:
+      - finger_calibration
+    safety_notes:
+      - Sequence of articulated poses; validate in sandbox first.
+forbidden_capabilities:
+  - id: fast_full_close
+    description: Close all fingers/joints to maximum at high speed
+    reason: Risk of collision and motor overload
+    severity: critical
+    enforcement:
+      policy_block: true
+      sandbox_block: true
+      real_robot_block: true
+  - id: forceful_grasp_without_current_limit
+    description: Forceful grasping without active current/torque limit
+    reason: Can damage the hand and grasped object
+    severity: critical
+    enforcement:
+      policy_block: true
+      sandbox_block: true
+      real_robot_block: true

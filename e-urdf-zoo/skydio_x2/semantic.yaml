@@ -1,0 +1,119 @@
+# Skydio X2 Semantic Annotation — Physical DNA Semantic Layer
+# For VLM/LLM grounding and task decomposition
+
+semantic_version: "1.0"
+
+# ── Functional Regions ──
+functional_regions:
+  - name: fuselage
+    link: base_link
+    tags: [body, central, housing, battery_compartment]
+    description: "Central fuselage housing battery, flight controller, and compute"
+    affordances: [carry, land]
+    visual_features:
+      - type: box
+        color: gray
+        dominant: true
+
+  - name: front_left_arm
+    link: arm_front_left
+    tags: [arm, structural, rotor_mount]
+    description: "Front-left arm extending from fuselage to rotor"
+    affordances: []
+    visual_features:
+      - type: cylinder
+        color: gray
+
+  - name: front_right_arm
+    link: arm_front_right
+    tags: [arm, structural, rotor_mount]
+    description: "Front-right arm extending from fuselage to rotor"
+    affordances: []
+    visual_features:
+      - type: cylinder
+        color: gray
+
+  - name: rear_left_arm
+    link: arm_rear_left
+    tags: [arm, structural, rotor_mount]
+    description: "Rear-left arm extending from fuselage to rotor"
+    affordances: []
+    visual_features:
+      - type: cylinder
+        color: gray
+
+  - name: rear_right_arm
+    link: arm_rear_right
+    tags: [arm, structural, rotor_mount]
+    description: "Rear-right arm extending from fuselage to rotor"
+    affordances: []
+    visual_features:
+      - type: cylinder
+        color: gray
+
+  - name: rotor_assembly
+    links: [propeller_fl, propeller_fr, propeller_rl, propeller_rr]
+    tags: [rotor, propeller, spinning, hazard]
+    description: "Four spinning propellers providing lift and control"
+    affordances: []
+    visual_features:
+      - type: disc
+        color: black
+        dominant: true
+
+  - name: camera_array
+    tags: [sensor, vision, stereo, navigation]
+    description: "Six navigation cameras for 360-degree obstacle avoidance"
+    affordances: [see, perceive]
+
+# ── Grasp Points / Affordances ──
+grasp_points:
+  - name: fuselage_grasp
+    link: base_link
+    position: [0, 0, 0]
+    approach_direction: [0, 0, 1]
+    description: "For hand-launching or carrying the drone"
+    safety: {max_force: 50.0}
+
+# ── Visual Features for VLM Grounding ──
+visual_features:
+  - name: x_body_frame
+    type: frame_structure
+    links: [arm_front_left, arm_front_right, arm_rear_left, arm_rear_right]
+    visual_cues: [gray_arms, symmetric]
+    llm_description: "X-shaped frame with four arms extending diagonally from center"
+
+  - name: front_cameras
+    type: camera_pair
+    links: [base_link]
+    visual_cues: [small_lenses, dual]
+    llm_description: "Pair of small camera lenses on the front of the fuselage"
+
+  - name: spinning_rotors
+    type: rotating_discs
+    links: [propeller_fl, propeller_fr, propeller_rl, propeller_rr]
+    visual_cues: [spinning_blur, black_discs]
+    llm_description: "Four spinning propellers, two spin clockwise and two counter-clockwise"
+
+# ── Task-Relevant Descriptions ──
+task_descriptions:
+  aerial_surveillance:
+    relevant_links: [base_link]
+    relevant_sensors: [front_stereo_camera, rear_stereo_camera, gps]
+    workspace_hint: "Operates in open air, maintain line of sight"
+    collision_warning: "Avoid obstacles within 2 meters"
+
+  waypoint_navigation:
+    relevant_links: [base_link]
+    relevant_sensors: [gps, imu, front_stereo_camera]
+    workspace_hint: "Navigate through GPS waypoints with obstacle avoidance"
+
+  object_tracking:
+    relevant_links: [base_link]
+    relevant_sensors: [front_stereo_camera, imu]
+    workspace_hint: "Maintain visual contact with target while keeping safe distance"
+
+  photogrammetry:
+    relevant_links: [base_link]
+    relevant_sensors: [front_stereo_camera, rear_stereo_camera, gps]
+    workspace_hint: "Fly overlapping patterns for 3D reconstruction"

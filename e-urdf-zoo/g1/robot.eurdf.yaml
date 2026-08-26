@@ -1,0 +1,264 @@
+# ROSClaw Extended URDF (e-URDF) — Unitree G1 Humanoid
+# Physical DNA Registry Entry
+# https://www.unitree.com/products/g1
+
+robot_id: unitree_g1
+name: G1
+vendor: Unitree
+version: "1.0"
+description: >
+  23-DOF general-purpose humanoid robot with dexterous hands,
+  2.35m/s walking speed, and whole-body control capabilities.
+
+# ── Kinematics ──
+dof: 23
+links:
+  - name: pelvis
+    type: base
+    mass: 5.0
+  - name: torso
+    type: link
+    mass: 8.0
+  - name: head
+    type: link
+    mass: 1.5
+  - name: left_hip_yaw
+    type: link
+    mass: 1.2
+  - name: left_hip_roll
+    type: link
+    mass: 1.5
+  - name: left_hip_pitch
+    type: link
+    mass: 3.5
+  - name: left_knee
+    type: link
+    mass: 2.5
+  - name: left_ankle
+    type: link
+    mass: 1.0
+  - name: left_foot
+    type: end_effector
+    mass: 0.5
+  - name: right_hip_yaw
+    type: link
+    mass: 1.2
+  - name: right_hip_roll
+    type: link
+    mass: 1.5
+  - name: right_hip_pitch
+    type: link
+    mass: 3.5
+  - name: right_knee
+    type: link
+    mass: 2.5
+  - name: right_ankle
+    type: link
+    mass: 1.0
+  - name: right_foot
+    type: end_effector
+    mass: 0.5
+  - name: left_shoulder_pitch
+    type: link
+    mass: 1.0
+  - name: left_shoulder_roll
+    type: link
+    mass: 1.0
+  - name: left_shoulder_yaw
+    type: link
+    mass: 0.8
+  - name: left_elbow
+    type: link
+    mass: 0.8
+  - name: left_hand
+    type: end_effector
+    mass: 0.3
+  - name: right_shoulder_pitch
+    type: link
+    mass: 1.0
+  - name: right_shoulder_roll
+    type: link
+    mass: 1.0
+  - name: right_shoulder_yaw
+    type: link
+    mass: 0.8
+  - name: right_elbow
+    type: link
+    mass: 0.8
+  - name: right_hand
+    type: end_effector
+    mass: 0.3
+
+joints:
+  - name: left_hip_yaw_joint
+    type: revolute
+    parent: pelvis
+    child: left_hip_yaw
+    axis: [0, 0, 1]
+    limits: {lower: -0.87, upper: 0.87, velocity: 10.0, effort: 100.0}
+  - name: left_hip_roll_joint
+    type: revolute
+    parent: left_hip_yaw
+    child: left_hip_roll
+    axis: [1, 0, 0]
+    limits: {lower: -0.52, upper: 0.52, velocity: 10.0, effort: 100.0}
+  - name: left_hip_pitch_joint
+    type: revolute
+    parent: left_hip_roll
+    child: left_hip_pitch
+    axis: [0, 1, 0]
+    limits: {lower: -1.92, upper: 1.05, velocity: 10.0, effort: 150.0}
+  - name: left_knee_joint
+    type: revolute
+    parent: left_hip_pitch
+    child: left_knee
+    axis: [0, 1, 0]
+    limits: {lower: -0.09, upper: 2.18, velocity: 10.0, effort: 150.0}
+  - name: left_ankle_joint
+    type: revolute
+    parent: left_knee
+    child: left_ankle
+    axis: [0, 1, 0]
+    limits: {lower: -0.61, upper: 0.61, velocity: 10.0, effort: 80.0}
+  - name: right_hip_yaw_joint
+    type: revolute
+    parent: pelvis
+    child: right_hip_yaw
+    axis: [0, 0, 1]
+    limits: {lower: -0.87, upper: 0.87, velocity: 10.0, effort: 100.0}
+  - name: right_hip_roll_joint
+    type: revolute
+    parent: right_hip_yaw
+    child: right_hip_roll
+    axis: [1, 0, 0]
+    limits: {lower: -0.52, upper: 0.52, velocity: 10.0, effort: 100.0}
+  - name: right_hip_pitch_joint
+    type: revolute
+    parent: right_hip_roll
+    child: right_hip_pitch
+    axis: [0, 1, 0]
+    limits: {lower: -1.92, upper: 1.05, velocity: 10.0, effort: 150.0}
+  - name: right_knee_joint
+    type: revolute
+    parent: right_hip_pitch
+    child: right_knee
+    axis: [0, 1, 0]
+    limits: {lower: -0.09, upper: 2.18, velocity: 10.0, effort: 150.0}
+  - name: right_ankle_joint
+    type: revolute
+    parent: right_knee
+    child: right_ankle
+    axis: [0, 1, 0]
+    limits: {lower: -0.61, upper: 0.61, velocity: 10.0, effort: 80.0}
+  - name: left_shoulder_pitch_joint
+    type: revolute
+    parent: torso
+    child: left_shoulder_pitch
+    axis: [0, 1, 0]
+    limits: {lower: -1.57, upper: 3.14, velocity: 10.0, effort: 50.0}
+  - name: left_shoulder_roll_joint
+    type: revolute
+    parent: left_shoulder_pitch
+    child: left_shoulder_roll
+    axis: [1, 0, 0]
+    limits: {lower: -0.79, upper: 3.14, velocity: 10.0, effort: 50.0}
+  - name: left_shoulder_yaw_joint
+    type: revolute
+    parent: left_shoulder_roll
+    child: left_shoulder_yaw
+    axis: [0, 0, 1]
+    limits: {lower: -1.57, upper: 1.57, velocity: 10.0, effort: 30.0}
+  - name: left_elbow_joint
+    type: revolute
+    parent: left_shoulder_yaw
+    child: left_elbow
+    axis: [0, 1, 0]
+    limits: {lower: -2.27, upper: 0.0, velocity: 10.0, effort: 30.0}
+  - name: right_shoulder_pitch_joint
+    type: revolute
+    parent: torso
+    child: right_shoulder_pitch
+    axis: [0, 1, 0]
+    limits: {lower: -1.57, upper: 3.14, velocity: 10.0, effort: 50.0}
+  - name: right_shoulder_roll_joint
+    type: revolute
+    parent: right_shoulder_pitch
+    child: right_shoulder_roll
+    axis: [1, 0, 0]
+    limits: {lower: -3.14, upper: 0.79, velocity: 10.0, effort: 50.0}
+  - name: right_shoulder_yaw_joint
+    type: revolute
+    parent: right_shoulder_roll
+    child: right_shoulder_yaw
+    axis: [0, 0, 1]
+    limits: {lower: -1.57, upper: 1.57, velocity: 10.0, effort: 30.0}
+  - name: right_elbow_joint
+    type: revolute
+    parent: right_shoulder_yaw
+    child: right_elbow
+    axis: [0, 1, 0]
+    limits: {lower: -2.27, upper: 0.0, velocity: 10.0, effort: 30.0}
+
+sensors:
+  - name: head_camera
+    type: camera
+    parent_link: head
+    resolution: [640, 480]
+    fov: 90.0
+  - name: imu
+    type: imu
+    parent_link: pelvis
+    rate: 1000.0
+
+actuators:
+  - name: joint_motors
+    type: electric_motor
+    max_torque: 150.0
+    max_velocity: 10.0
+  - name: left_leg
+    type: actuator_group
+    joints:
+      - left_hip_yaw_joint
+      - left_hip_roll_joint
+      - left_hip_pitch_joint
+      - left_knee_joint
+      - left_ankle_joint
+  - name: right_leg
+    type: actuator_group
+    joints:
+      - right_hip_yaw_joint
+      - right_hip_roll_joint
+      - right_hip_pitch_joint
+      - right_knee_joint
+      - right_ankle_joint
+  - name: left_arm
+    type: actuator_group
+    joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+  - name: right_arm
+    type: actuator_group
+    joints:
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+
+capabilities:
+  - name: walk
+    description: Bipedal walking on flat terrain
+    parameters: {speed: {min: 0.0, max: 2.35, unit: m/s}}
+  - name: stand
+    description: Maintain upright standing posture
+    parameters: {}
+  - name: reach
+    description: Reach to target with arm end-effector
+    parameters: {target_pose: {type: array, length: 6}}
+
+simulation_backends:
+  mujoco:
+    model_file: g1.xml
+    timestep: 0.002
+    integrator: implicitfast

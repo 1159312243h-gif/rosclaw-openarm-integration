@@ -1,0 +1,36 @@
+# Operations
+uint8 MOVE_RELATIVE=1
+uint8 MOVE_ABSOLUTE=2
+uint8 HOME=3
+
+# Goal
+string request_id
+string arm
+uint8 operation
+string reference_frame
+geometry_msgs/Vector3 translation
+geometry_msgs/PoseStamped target_pose
+float64 velocity_scale
+float64 acceleration_scale
+bool avoid_collisions
+---
+# Result
+bool success
+int32 error_code
+string message
+geometry_msgs/PoseStamped initial_pose
+geometry_msgs/PoseStamped target_pose
+geometry_msgs/PoseStamped final_pose
+float64 final_error_m
+---
+# Feedback phases
+uint8 VALIDATING=1
+uint8 PLANNING=2
+uint8 EXECUTING=3
+uint8 VERIFYING=4
+
+# Feedback
+uint8 phase
+float32 progress
+string message
+geometry_msgs/PoseStamped current_pose

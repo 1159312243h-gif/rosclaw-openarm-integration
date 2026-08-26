@@ -1,0 +1,12 @@
+./ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py: 失败
+./ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_axis_fix_20260812_151850: 打开或读取失败
+./ros_ws/src/openarm_moveit_config/launch/moveit_minimal.launch.py.before_limits_20260812_153918: 打开或读取失败
+./ros_ws/src/rosclaw_motion/package.xml: 失败
+./ros_ws/src/rosclaw_motion/setup.py: 失败
+./ros_ws/src/rosclaw_openarm_bringup/config/openarm_sim.yaml: 失败
+./ros_ws/src/rosclaw_openarm_bringup/launch/openarm_pick_demo.launch.py: 失败
+./ros_ws/src/rosclaw_openarm_bringup/launch/openarm_sim.launch.py: 失败
+./ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py: 失败
+./ros_ws/src/rosclaw_openarm_bringup/scripts/mujoco_moveit_bridge.py.before_boundary_20260812_160633: 打开或读取失败
+sha256sum: 警告：3 个列出的文件无法读取
+sha256sum: 警告：7 个校验和不匹配

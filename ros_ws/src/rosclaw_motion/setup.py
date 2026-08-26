@@ -1,0 +1,27 @@
+from setuptools import find_packages, setup
+
+
+package_name = "rosclaw_motion"
+
+setup(
+    name=package_name,
+    version="0.4.1",
+    packages=find_packages(exclude=["test"]),
+    data_files=[
+        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        ("share/" + package_name, ["package.xml"]),
+    ],
+    install_requires=["setuptools"],
+    zip_safe=True,
+    tests_require=["pytest"],
+    maintainer="hkz",
+    maintainer_email="hkz@example.com",
+    description="Structured relative arm motion server for RosClaw and MoveIt 2.",
+    license="Apache-2.0",
+    entry_points={
+        "console_scripts": [
+            "relative_motion_server = rosclaw_motion.relative_motion_server:main",
+        ],
+    },
+)
+

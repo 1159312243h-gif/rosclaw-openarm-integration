@@ -1,0 +1,38 @@
+# ROSClaw ROS 1 integration test stack
+#
+# Brings up ROS 1 Noetic + rosbridge + turtlesim so that ROSClaw tests can
+# run against a real rosbridge endpoint without requiring ROS on the host.
+#
+# ROS1 rosbridge validates the port in the HTTP Host header. The compose
+# service forwards the published host port through websocket_external_port so
+# clients can connect through the mapped port.
+#
+# Usage:
+#   docker compose -f docker-compose.ros1-test.yml up --build -d
+#   pytest tests/connectors/ros/test_turtlesim_integration.py -v \
+#       --endpoint ws://127.0.0.1:9091
+#   docker compose -f docker-compose.ros1-test.yml down
+#
+services:
+  ros-bridge:
+    build:
+      context: .
+      dockerfile: docker/ros1-noetic-bridge.Dockerfile
+    image: rosclaw/ros1-noetic-bridge:latest
+    container_name: ${ROSBRIDGE_CONTAINER_NAME:-rosclaw-ros1-noetic-bridge}
+    ports:
+      - "${ROSBRIDGE_HOST_PORT:-9091}:9090"
+    environment:
+      ROSBRIDGE_EXTERNAL_PORT: "${ROSBRIDGE_HOST_PORT:-9091}"
+    networks:
+      - rosclaw-ros-test
+    healthcheck:
+      test: ["CMD", "bash", "-c", "source /opt/ros/noetic/setup.bash && rostopic list"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+networks:
+  rosclaw-ros-test:
+    driver: bridge

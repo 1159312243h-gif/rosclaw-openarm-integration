@@ -1,0 +1,17 @@
+schema_version: "rosclaw.policy.v1"
+
+policy:
+  name: "openarm_move_relative_policy"
+  type: "classical"
+  modes:
+    - classical
+  default_mode: "classical"
+
+classical:
+  controller: "openarm_move_relative_controller"
+  params: "policies/params/default.yaml"
+
+fallback:
+  on_policy_unavailable: "abort_and_explain"
+  on_low_confidence: "verify_or_abort"
+  on_sandbox_block: "abort_and_explain"

@@ -1,0 +1,60 @@
+<?xml version="1.0"?>
+<robot name="inspire_hand_right">
+  <link name="base_link"/>
+  <link name="thumb_base"/>
+  <link name="thumb_tip"/>
+  <link name="index_base"/>
+  <link name="index_tip"/>
+  <link name="middle_base"/>
+  <link name="ring_base"/>
+  <link name="little_base"/>
+
+  <joint name="thumb_joint_0" type="revolute">
+    <parent link="base_link"/>
+    <child link="thumb_base"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="thumb_joint_1" type="revolute">
+    <parent link="thumb_base"/>
+    <child link="thumb_tip"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="index_joint_0" type="revolute">
+    <parent link="base_link"/>
+    <child link="index_base"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="index_joint_1" type="revolute">
+    <parent link="index_base"/>
+    <child link="index_tip"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="middle_joint_0" type="revolute">
+    <parent link="base_link"/>
+    <child link="middle_base"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="ring_joint_0" type="revolute">
+    <parent link="base_link"/>
+    <child link="ring_base"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="little_joint_0" type="revolute">
+    <parent link="base_link"/>
+    <child link="little_base"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>

@@ -1,0 +1,23 @@
+schema_version: e_urdf.sandbox.v1
+engines:
+  mujoco:
+    supported: true
+    model_path: model/model.urdf
+    status: converted
+  isaacsim:
+    supported: false
+    model_path: null
+    status: not_converted
+  pybullet:
+    supported: false
+    model_path: null
+    status: not_converted
+validation:
+  smoke_tests:
+    - load_urdf
+    - check_joint_limits
+default_test_poses:
+  - id: open_hand
+    description: All joints at open position
+  - id: close_hand_slow
+    description: All joints at slow-close position

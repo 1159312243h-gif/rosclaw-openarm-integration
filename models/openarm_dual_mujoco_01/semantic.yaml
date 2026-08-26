@@ -1,0 +1,226 @@
+semantic_version: '1.0'
+robot_id: openarm_dual_mujoco_01
+robot_kind: fixed_base_dual_arm
+planning_frame: world
+functional_regions:
+- name: base
+  link: openarm_body_link0
+  tags:
+  - mount
+  - stationary
+  - dual_arm_support
+  description: Fixed OpenArm body mounted in the world frame
+  affordances: []
+- name: left_arm
+  links:
+  - openarm_left_base_link
+  - openarm_left_link1
+  - openarm_left_link2
+  - openarm_left_link3
+  - openarm_left_link4
+  - openarm_left_link5
+  - openarm_left_link6
+  - openarm_left_ee_base_link
+  joints: &id001
+  - openarm_left_joint1
+  - openarm_left_joint2
+  - openarm_left_joint3
+  - openarm_left_joint4
+  - openarm_left_joint5
+  - openarm_left_joint6
+  - openarm_left_joint7
+  tags:
+  - manipulator
+  - left
+  - seven_dof
+  description: Seven-joint left manipulation arm
+  affordances:
+  - translate_end_effector
+  - orient_end_effector
+- name: right_arm
+  links:
+  - openarm_right_base_link
+  - openarm_right_link1
+  - openarm_right_link2
+  - openarm_right_link3
+  - openarm_right_link4
+  - openarm_right_link5
+  - openarm_right_link6
+  - openarm_right_ee_base_link
+  joints: &id002
+  - openarm_right_joint1
+  - openarm_right_joint2
+  - openarm_right_joint3
+  - openarm_right_joint4
+  - openarm_right_joint5
+  - openarm_right_joint6
+  - openarm_right_joint7
+  tags:
+  - manipulator
+  - right
+  - seven_dof
+  description: Seven-joint right manipulation arm
+  affordances:
+  - translate_end_effector
+  - orient_end_effector
+- name: left_wrist
+  links:
+  - openarm_left_link5
+  - openarm_left_link6
+  - openarm_left_ee_base_link
+  joints:
+  - openarm_left_joint5
+  - openarm_left_joint6
+  - openarm_left_joint7
+  tags:
+  - wrist
+  - left
+  - dexterous
+  description: Left arm wrist joint region
+  affordances:
+  - orient
+- name: right_wrist
+  links:
+  - openarm_right_link5
+  - openarm_right_link6
+  - openarm_right_ee_base_link
+  joints:
+  - openarm_right_joint5
+  - openarm_right_joint6
+  - openarm_right_joint7
+  tags:
+  - wrist
+  - right
+  - dexterous
+  description: Right arm wrist joint region
+  affordances:
+  - orient
+- name: left_tool_mount
+  link: openarm_left_ee_base_link
+  tags:
+  - end_effector
+  - tool_mount
+  - left
+  - tcp
+  description: MoveIt tip link for left-arm Cartesian motion
+  affordances:
+  - cartesian_target
+- name: right_tool_mount
+  link: openarm_right_ee_base_link
+  tags:
+  - end_effector
+  - tool_mount
+  - right
+  - tcp
+  description: MoveIt tip link for right-arm Cartesian motion
+  affordances:
+  - cartesian_target
+- name: left_gripper
+  links:
+  - openarm_left_ee_base_link
+  - openarm_left_ee_link1
+  - openarm_left_ee_link2
+  joints: &id003
+  - openarm_left_finger_joint1
+  - openarm_left_finger_joint2
+  tags:
+  - gripper
+  - left
+  - mimic_coupled
+  description: Left two-finger gripper; second finger is mimic-coupled
+  affordances: []
+- name: right_gripper
+  links:
+  - openarm_right_ee_base_link
+  - openarm_right_ee_link1
+  - openarm_right_ee_link2
+  joints: &id004
+  - openarm_right_finger_joint1
+  - openarm_right_finger_joint2
+  tags:
+  - gripper
+  - right
+  - mimic_coupled
+  description: Right two-finger gripper; second finger is mimic-coupled
+  affordances: []
+planning_groups:
+  left_arm:
+    joints: *id001
+    tip_link: openarm_left_ee_base_link
+    reference_frame: world
+  right_arm:
+    joints: *id002
+    tip_link: openarm_right_ee_base_link
+    reference_frame: world
+  left_gripper:
+    joints: *id003
+  right_gripper:
+    joints: *id004
+mounting:
+  parent_frame: world
+  base_link: openarm_body_link0
+  joint: openarm_body_link0_mount_joint
+  mount_height_m: 0.42
+  joint_type: fixed
+reference_frames:
+  world:
+    description: MoveIt planning frame and supported relative-motion frame
+    axes:
+      x: world_positive_x
+      y: world_positive_y
+      z: world_up
+task_descriptions:
+  openarm.arm.move_relative:
+    description: Translate one selected end effector in the world frame
+    allowed_arms:
+    - left
+    - right
+    planning_groups:
+    - left_arm
+    - right_arm
+    tip_links:
+      left: openarm_left_ee_base_link
+      right: openarm_right_ee_base_link
+    relevant_joints:
+      left: *id001
+      right: *id002
+    workspace_hint: Requests are limited to 20 mm per action and must produce a complete
+      Cartesian path
+    collision_warning: Current integration defaults avoid_collisions to false and
+      has no configured Octomap 3D sensor
+  openarm.gripper.move:
+    description: Move one selected parallel gripper to an absolute opening target
+    allowed_sides:
+    - left
+    - right
+    planning_groups:
+    - left_gripper
+    - right_gripper
+    driver_joints:
+      left: openarm_left_finger_joint1
+      right: openarm_right_finger_joint1
+    mimic_joints:
+      left: openarm_left_finger_joint2
+      right: openarm_right_finger_joint2
+    target_range_m:
+    - 0.0
+    - 0.044
+    simulation_only: true
+  openarm.pick_demo:
+    description: Pick and lift the deterministic demo block with the right gripper
+    allowed_sides:
+    - right
+    allowed_objects:
+    - pick_demo_block
+    planning_groups:
+    - right_arm
+    - right_gripper
+    object_pose_topic: /openarm/pick_demo/object_pose
+    minimum_verified_object_rise_m: 0.008
+    simulation_only: true
+known_limitations:
+- Arm motion supports only relative Cartesian translation
+- Gripper motion supports only absolute opening targets
+- Absolute pose and HOME operations are not implemented
+- Right arm starts near its downward Cartesian workspace boundary
+- No Octomap 3D sensor plugin is configured

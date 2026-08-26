@@ -1,0 +1,75 @@
+schema_version: e_urdf.asset.v1
+asset:
+  id: grippers/panda/default
+  name: Franka Panda Gripper
+  version: 1.0.0
+  status: experimental
+  category: grippers
+  vendor: Franka Emika
+  model: panda_gripper
+  variant: default
+  description: Minimal Franka Panda gripper fixture for ROSClaw e-URDF-Zoo integration tests.
+source:
+  type: third_party_import
+  upstream_repo: frankaemika/panda_gripper
+  upstream_url: ""
+  upstream_commit: unknown
+  upstream_path: ""
+  imported_at: ""
+  importer: rosclaw-test-fixture
+license:
+  repo_declared_license: MIT
+  upstream_model_license: Apache-2.0
+  source_url: ""
+  source_commit: unknown
+  notice_file: licenses/NOTICE
+  third_party_file: licenses/THIRD_PARTY.yaml
+  import_blocking: false
+  display_warning: false
+  commercial_review_recommended: false
+  notes: []
+model:
+  primary_format: urdf
+  urdf: model/model.urdf
+  mjcf: null
+  xml: null
+  meshes_dir: meshes/
+  visual_meshes_dir: meshes/visual/
+  collision_meshes_dir: meshes/collision/
+robot:
+  morphology: gripper
+  robot_class: end_effector
+  side: null
+  root_frame: base_link
+  mounting_frame: mounting
+  tcp_frame: tcp
+  dof: 1
+semantics:
+  semantic_file: semantic.yaml
+  capabilities_file: capabilities.yaml
+  safety_file: safety.yaml
+  providers_file: providers.yaml
+  sandbox_file: sandbox.yaml
+  calibration_defaults_file: calibration_defaults.yaml
+  prompts_dir: prompts/
+quality:
+  validation_status: experimental
+  parser_validation: {}
+  simulation_validation: {}
+  mesh_validation: {}
+  safety_review: pending
+runtime_policy:
+  real_robot_execution_allowed: false
+  sandbox_required: true
+  provider_required: true
+  calibration_required: true
+  low_speed_first_run_required: true
+  fault_monitor_required: true
+checksums:
+  file: checksums.json
+tags:
+  - gripper
+  - panda
+  - franka
+aliases:
+  panda_gripper: grippers/panda/default

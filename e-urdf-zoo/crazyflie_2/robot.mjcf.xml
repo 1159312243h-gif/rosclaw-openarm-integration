@@ -1,0 +1,149 @@
+<mujoco model="crazyflie_2_1">
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.001" integrator="implicitfast">
+    <flag warmstart="enable"/>
+  </option>
+
+  <default>
+    <default class="crazyflie">
+      <geom rgba="0.9 0.9 0.9 1" material="body_mat"/>
+      <joint armature="0.0001" damping="0.001"/>
+      <site size="0.002" rgba="1 0 0 0.3"/>
+    </default>
+    <default class="propeller">
+      <geom type="cylinder" size="0.023 0.001" rgba="0.7 0.7 0.7 0.6"/>
+      <joint type="hinge" axis="0 0 1" damping="0.0001"/>
+    </default>
+    <default class="arm">
+      <geom type="capsule" size="0.0015" rgba="0.9 0.9 0.9 1"/>
+    </default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
+  </default>
+
+  <asset>
+    <material name="body_mat" specular="0.3" shininess="0.15" rgba="0.9 0.9 0.9 1"/>
+    <material name="prop_mat" specular="0.2" shininess="0.1" rgba="0.7 0.7 0.7 0.6"/>
+    <material name="motor_mat" specular="0.5" shininess="0.3" rgba="0.2 0.2 0.2 1"/>
+    <material name="led_red" emission="1.0" rgba="1.0 0.0 0.0 1"/>
+    <material name="led_green" emission="1.0" rgba="0.0 1.0 0.0 1"/>
+    <material name="led_blue" emission="1.0" rgba="0.0 0.5 1.0 1"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2" pos="0 0 5" dir="0 0 -1"/>
+    <light directional="true" diffuse=".3 .3 .3" specular=".1 .1 .1" pos="5 0 3" dir="-1 0 -0.5"/>
+
+    <body name="crazyflie_2_1" pos="0 0 0.5" childclass="crazyflie">
+      <!-- Free joint for 6-DOF movement -->
+      <freejoint name="root"/>
+
+      <!-- Central fuselage (PCB body) -->
+      <inertial mass="0.022" pos="0 0 0" diaginertia="1.4e-5 1.4e-5 2.2e-5"/>
+      <geom name="fuselage" type="box" size="0.02 0.02 0.003" class="visual"/>
+      <geom name="fuselage_collision" type="box" size="0.02 0.02 0.003" class="collision"/>
+
+      <!-- Battery on top -->
+      <geom name="battery" type="box" pos="0 0 0.005" size="0.012 0.008 0.004" rgba="0.1 0.1 0.1 1" class="visual"/>
+
+      <!-- LED indicators on arms -->
+      <geom name="led_fl" type="sphere" pos="0.018 0.018 0.004" size="0.001" material="led_red" class="visual"/>
+      <geom name="led_fr" type="sphere" pos="0.018 -0.018 0.004" size="0.001" material="led_green" class="visual"/>
+      <geom name="led_rl" type="sphere" pos="-0.018 0.018 0.004" size="0.001" material="led_green" class="visual"/>
+      <geom name="led_rr" type="sphere" pos="-0.018 -0.018 0.004" size="0.001" material="led_red" class="visual"/>
+
+      <!-- USB connector -->
+      <geom name="usb_connector" type="box" pos="0.022 0 0" size="0.003 0.004 0.002" rgba="0.1 0.1 0.1 1" class="visual"/>
+
+      <!-- Front-left arm -->
+      <body name="arm_fl" pos="0.02 0.02 0">
+        <geom name="arm_fl_geom" fromto="0 0 0 0.013 0.013 0" class="arm"/>
+        <body name="motor_fl" pos="0.013 0.013 0.002">
+          <geom name="motor_fl_housing" type="cylinder" size="0.003 0.002" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_fl_joint" class="propeller"/>
+          <geom name="prop_fl" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" material="prop_mat" class="visual"/>
+          <geom name="prop_fl_collision" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" class="collision"/>
+          <site name="thrust_fl" pos="0 0 0.003" size="0.002"/>
+        </body>
+      </body>
+
+      <!-- Front-right arm -->
+      <body name="arm_fr" pos="0.02 -0.02 0">
+        <geom name="arm_fr_geom" fromto="0 0 0 0.013 -0.013 0" class="arm"/>
+        <body name="motor_fr" pos="0.013 -0.013 0.002">
+          <geom name="motor_fr_housing" type="cylinder" size="0.003 0.002" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_fr_joint" class="propeller"/>
+          <geom name="prop_fr" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" material="prop_mat" class="visual"/>
+          <geom name="prop_fr_collision" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" class="collision"/>
+          <site name="thrust_fr" pos="0 0 0.003" size="0.002"/>
+        </body>
+      </body>
+
+      <!-- Rear-left arm -->
+      <body name="arm_rl" pos="-0.02 0.02 0">
+        <geom name="arm_rl_geom" fromto="0 0 0 -0.013 0.013 0" class="arm"/>
+        <body name="motor_rl" pos="-0.013 0.013 0.002">
+          <geom name="motor_rl_housing" type="cylinder" size="0.003 0.002" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_rl_joint" class="propeller"/>
+          <geom name="prop_rl" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" material="prop_mat" class="visual"/>
+          <geom name="prop_rl_collision" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" class="collision"/>
+          <site name="thrust_rl" pos="0 0 0.003" size="0.002"/>
+        </body>
+      </body>
+
+      <!-- Rear-right arm -->
+      <body name="arm_rr" pos="-0.02 -0.02 0">
+        <geom name="arm_rr_geom" fromto="0 0 0 -0.013 -0.013 0" class="arm"/>
+        <body name="motor_rr" pos="-0.013 -0.013 0.002">
+          <geom name="motor_rr_housing" type="cylinder" size="0.003 0.002" rgba="0.2 0.2 0.2 1" class="visual"/>
+          <joint name="motor_rr_joint" class="propeller"/>
+          <geom name="prop_rr" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" material="prop_mat" class="visual"/>
+          <geom name="prop_rr_collision" type="cylinder" size="0.023 0.0005" pos="0 0 0.002" class="collision"/>
+          <site name="thrust_rr" pos="0 0 0.003" size="0.002"/>
+        </body>
+      </body>
+
+      <!-- Flow deck (bottom sensor) -->
+      <geom name="flow_deck" type="box" pos="0 0 -0.005" size="0.015 0.015 0.001" rgba="0.1 0.3 0.1 1" class="visual"/>
+
+      <!-- Multi-ranger sensors (simplified as small boxes) -->
+      <geom name="ranger_front" type="box" pos="0.022 0 0" size="0.002 0.003 0.002" rgba="0.3 0.3 0.8 1" class="visual"/>
+      <geom name="ranger_back" type="box" pos="-0.022 0 0" size="0.002 0.003 0.002" rgba="0.3 0.3 0.8 1" class="visual"/>
+      <geom name="ranger_left" type="box" pos="0 0.022 0" size="0.003 0.002 0.002" rgba="0.3 0.3 0.8 1" class="visual"/>
+      <geom name="ranger_right" type="box" pos="0 -0.022 0" size="0.003 0.002 0.002" rgba="0.3 0.3 0.8 1" class="visual"/>
+
+      <!-- IMU site -->
+      <site name="imu" pos="0 0 0" size="0.001" rgba="1 0 0 0.5"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Motor actuators: thrust control -->
+    <motor name="motor_fl" joint="motor_fl_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 0.15"/>
+    <motor name="motor_fr" joint="motor_fr_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 0.15"/>
+    <motor name="motor_rl" joint="motor_rl_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 0.15"/>
+    <motor name="motor_rr" joint="motor_rr_joint" gear="0 0 1 0 0 0" ctrllimited="true" ctrlrange="0 0.15"/>
+  </actuator>
+
+  <sensor>
+    <!-- IMU sensors -->
+    <accelerometer name="imu_accel" site="imu"/>
+    <gyro name="imu_gyro" site="imu"/>
+    <framequat name="imu_quat" objtype="site" objname="imu"/>
+
+    <!-- Motor velocity sensors -->
+    <jointvel name="motor_fl_vel" joint="motor_fl_joint"/>
+    <jointvel name="motor_fr_vel" joint="motor_fr_joint"/>
+    <jointvel name="motor_rl_vel" joint="motor_rl_joint"/>
+    <jointvel name="motor_rr_vel" joint="motor_rr_joint"/>
+  </sensor>
+
+  <keyframe>
+    <key name="hover" qpos="0 0 0.5 1 0 0 0 0 0 0 0" ctrl="0.0375 0.0375 0.0375 0.0375"/>
+  </keyframe>
+</mujoco>

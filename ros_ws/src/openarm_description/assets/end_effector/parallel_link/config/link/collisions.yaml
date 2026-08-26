@@ -1,0 +1,39 @@
+base_link:
+  origin: &zero_origin
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+  geometry:
+    mesh: package://openarm_description/assets/end_effector/parallel_link/meshes/collision/hand.stl
+    scale: &millimeter_scale
+      x: 0.001
+      y: 0.001
+      z: 0.001
+link1:
+  origin:
+    x: 0.0
+    y: 0.05
+    z: -0.673001
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+  geometry:
+    mesh: package://openarm_description/assets/end_effector/parallel_link/meshes/collision/finger.stl
+    scale:
+      x: 0.001
+      y: -0.001
+      z: 0.001
+link2:
+  origin:
+    x: 0.0
+    y: -0.05
+    z: -0.673001
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+  geometry:
+    mesh: package://openarm_description/assets/end_effector/parallel_link/meshes/collision/finger.stl
+    scale: *millimeter_scale

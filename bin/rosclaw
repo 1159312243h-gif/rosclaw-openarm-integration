@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+ROSClaw CLI - Universal Operating System for Software-Defined Embodied AI
+
+Usage:
+    rosclaw start [--config path] [--robot-id ID] [--model-path PATH]
+    rosclaw status
+    rosclaw stop
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """Start the ROSClaw runtime."""
+    from rosclaw.core import Runtime, RuntimeConfig
+
+    config = RuntimeConfig(
+        robot_id=args.robot_id,
+        robot_model_path=args.model_path,
+        enable_firewall=args.firewall,
+        enable_memory=args.memory,
+        enable_practice=args.practice,
+        enable_swarm=args.swarm,
+    )
+
+    runtime = Runtime(config)
+
+    try:
+        runtime.initialize()
+        runtime.start()
+
+        print(f"\n[ROSClaw] Runtime started for robot: {args.robot_id}")
+        print("[ROSClaw] Press Ctrl+C to stop\n")
+
+        # Keep running
+        import time
+        while runtime.is_running:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n[ROSClaw] Shutdown requested...")
+    finally:
+        runtime.stop()
+
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show ROSClaw runtime status."""
+    print("[ROSClaw] Status check not yet implemented")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="rosclaw",
+        description="ROSClaw - Universal OS for Software-Defined Embodied AI",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # start command
+    start_parser = subparsers.add_parser("start", help="Start ROSClaw runtime")
+    start_parser.add_argument("--robot-id", default="rosclaw_default", help="Robot identifier")
+    start_parser.add_argument("--model-path", default=None, help="Path to robot model file")
+    start_parser.add_argument("--firewall", action="store_true", default=True, help="Enable Digital Twin Firewall")
+    start_parser.add_argument("--memory", action="store_true", default=True, help="Enable Memory module")
+    start_parser.add_argument("--practice", action="store_true", default=True, help="Enable Practice recorder")
+    start_parser.add_argument("--swarm", action="store_true", default=False, help="Enable Swarm coordination")
+
+    # status command
+    subparsers.add_parser("status", help="Show runtime status")
+
+    args = parser.parse_args()
+
+    if args.command == "start":
+        return cmd_start(args)
+    elif args.command == "status":
+        return cmd_status(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

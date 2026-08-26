@@ -1,0 +1,132 @@
+safety_level: STRICT
+joint_soft_limits:
+  shoulder_pan_joint:
+    lower: -6.1
+    upper: 6.1
+    k_position: 100.0
+    k_velocity: 50.0
+  shoulder_lift_joint:
+    lower: -6.1
+    upper: 6.1
+    k_position: 100.0
+    k_velocity: 50.0
+  elbow_joint:
+    lower: -3.0
+    upper: 3.0
+    k_position: 100.0
+    k_velocity: 50.0
+  wrist_1_joint:
+    lower: -6.1
+    upper: 6.1
+    k_position: 50.0
+    k_velocity: 25.0
+  wrist_2_joint:
+    lower: -6.1
+    upper: 6.1
+    k_position: 50.0
+    k_velocity: 25.0
+  wrist_3_joint:
+    lower: -6.1
+    upper: 6.1
+    k_position: 50.0
+    k_velocity: 25.0
+pfl:
+  enabled: true
+  max_tcp_force: 150.0
+  max_tcp_torque: 8.0
+  max_static_force: 50.0
+  max_pressure: 150.0
+  max_speed_tool: 0.25
+  max_speed_joint: 1.57
+collision_detection:
+  method: force_threshold
+  threshold_force: 50.0
+  threshold_torque: 3.0
+  reaction_time_ms: 4.0
+  reaction_strategy: stop_and_retract
+  retraction_distance: 0.02
+emergency_stop:
+  category: 3
+  stop_time_ms: 250.0
+  stop_distance_m: 0.3
+  dual_channel: true
+workspace_boundaries:
+  type: enclosure
+  fenceless: true
+  x: [-0.85, 0.85]
+  y: [-0.85, 0.85]
+  z: [0.0, 1.2]
+  virtual_boundaries:
+  - name: front_plane
+    type: plane
+    normal:
+    - 0
+    - 1
+    - 0
+    offset: -0.5
+  - name: top_plane
+    type: plane
+    normal:
+    - 0
+    - 0
+    - -1
+    offset: 1.5
+interaction:
+  hand_guiding: true
+  speed_slider_max: 0.25
+  force_guiding_max: 10.0
+  protective_stop_on_contact: true
+environment:
+  ambient_temp_min: 0.0
+  ambient_temp_max: 50.0
+  humidity_max: 80.0
+  ip_rating: IP54
+  cleanroom_class: ISO 5
+safety_limits:
+  joint_limits:
+    shoulder_pan_joint:
+      lower: -6.28
+      upper: 6.28
+    shoulder_lift_joint:
+      lower: -6.28
+      upper: 6.28
+    elbow_joint:
+      lower: -3.14
+      upper: 3.14
+    wrist_1_joint:
+      lower: -6.28
+      upper: 6.28
+    wrist_2_joint:
+      lower: -6.28
+      upper: 6.28
+    wrist_3_joint:
+      lower: -6.28
+      upper: 6.28
+  velocity_limits:
+    shoulder_pan_joint: 3.14
+    shoulder_lift_joint: 3.14
+    elbow_joint: 3.14
+    wrist_1_joint: 6.28
+    wrist_2_joint: 6.28
+    wrist_3_joint: 6.28
+  force_limits:
+    max_tcp_force: 200.0
+    max_tcp_torque: 10.0
+    max_joint_effort: 150.0
+  workspace:
+    type: sphere
+    center:
+    - 0
+    - 0
+    - 0.425
+    radius: 0.85
+    height_min: 0.0
+    height_max: 1.2
+  collision_pairs_to_check:
+  - - upper_arm_link
+    - forearm_link
+  - - forearm_link
+    - wrist_1_link
+  power_limits:
+    max_power: 350.0
+    max_current_total: 40.0

@@ -1,0 +1,51 @@
+# OMPL 规划器配置 - ROS2 Jazzy / MoveIt 2 新格式
+# 关键：使用 planning_plugins (复数) 而不是 planning_plugin (单数)
+
+planning_plugins:
+  - ompl_interface/OMPLPlanner
+
+# 规划请求适配器（按顺序处理）
+request_adapters:
+  - default_planning_request_adapters/ResolveConstraintFrames
+  - default_planning_request_adapters/ValidateWorkspaceBounds
+  - default_planning_request_adapters/CheckStartStateBounds
+  - default_planning_request_adapters/CheckStartStateCollision
+
+# 规划响应适配器
+response_adapters:
+  - default_planning_response_adapters/AddTimeOptimalParameterization
+  - default_planning_response_adapters/ValidateSolution
+  - default_planning_response_adapters/DisplayMotionPath
+
+# 规划器配置
+planner_configs:
+  RRTConnect:
+    type: geometric::RRTConnect
+  RRT:
+    type: geometric::RRT
+  EST:
+    type: geometric::EST
+  LBKPIECE:
+    type: geometric::LBKPIECE
+  KPIECE:
+    type: geometric::KPIECE
+
+# 左臂配置
+left_arm:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect
+    - RRT
+    - EST
+  projection_evaluator: joints(openarm_left_joint1,openarm_left_joint2)
+  longest_valid_segment_fraction: 0.005
+
+# 右臂配置
+right_arm:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect
+    - RRT
+    - EST
+  projection_evaluator: joints(openarm_right_joint1,openarm_right_joint2)
+  longest_valid_segment_fraction: 0.005

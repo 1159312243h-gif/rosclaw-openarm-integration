@@ -1,0 +1,14 @@
+# OpenArm parallel gripper topology in the v2 component schema.
+links:
+  - base_link
+  - link1
+  - link2
+joints:
+  joint1:
+    type: prismatic
+    parent: base_link
+    child: link1
+  joint2:
+    type: prismatic
+    parent: base_link
+    child: link2

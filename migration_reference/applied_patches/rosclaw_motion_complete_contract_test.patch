@@ -1,0 +1,13 @@
+diff --git a/src/rosclaw_motion/test/test_relative_motion_contract.py b/src/rosclaw_motion/test/test_relative_motion_contract.py
+--- a/src/rosclaw_motion/test/test_relative_motion_contract.py
++++ b/src/rosclaw_motion/test/test_relative_motion_contract.py
+@@ -97,3 +97,9 @@ def test_result_contains_structured_verification_fields():
+         ERROR_SUCCESS,
+         "verified",
+         final_error_m=0.001,
++    )
++
++    assert result.success is True
++    assert result.error_code == ERROR_SUCCESS
++    assert result.message == "verified"
++    assert result.final_error_m == pytest.approx(0.001)

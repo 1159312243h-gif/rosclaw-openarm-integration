@@ -1,0 +1,36 @@
+"""
+ROSClaw Memory - Experience Grounding Engine
+
+Interface to SeekDB (Shared Knowledge Plane).
+Stores and retrieves robot experiences, skills, and world knowledge.
+"""
+
+from rosclaw.memory.interface import MemoryInterface
+from rosclaw.memory.seekdb_client import (
+    InMemoryKnowledgeStore,
+    SeekDBClient,
+    SeekDBMemoryClient,
+    SeekDBMySQLClient,
+    SeekDBSQLiteClient,
+    SQLiteKnowledgeStore,
+)
+from rosclaw.memory.types import ArtifactRef, FailureMemory, PraxisEvent
+
+# Backward-compatible aliases for documentation
+SQLiteSeekDB = SQLiteKnowledgeStore
+MemorySeekDB = InMemoryKnowledgeStore
+
+__all__ = [
+    "MemoryInterface",
+    "SeekDBClient",
+    "InMemoryKnowledgeStore",
+    "SeekDBMemoryClient",
+    "MemorySeekDB",
+    "SeekDBMySQLClient",
+    "SQLiteKnowledgeStore",
+    "SeekDBSQLiteClient",
+    "SQLiteSeekDB",
+    "PraxisEvent",
+    "FailureMemory",
+    "ArtifactRef",
+]

@@ -1,0 +1,11 @@
+schema_version: "rosclaw.providers.v1"
+
+required_capabilities: {}
+
+providers: {}
+
+routing_policy:
+  default: "capability_first"
+  prefer_local: true
+  require_health_check: false
+  fallback_on: []

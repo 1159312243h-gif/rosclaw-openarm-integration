@@ -1,0 +1,26 @@
+schema_version: "rosclaw.eurdf_compat.v1"
+
+compatible_robots:
+  - robot: "openarm_dual_mujoco_01"
+    eurdf_profile: "openarm/openarm_dual_mujoco_01@>=1.0.0"
+    body_profile:
+      min_dof: 16
+    required_limbs:
+      - left_arm
+      - right_arm
+    required_sensors:
+      - robot_state
+    optional_sensors: []
+    required_frames:
+      - world
+      - openarm_left_ee_base_link
+      - openarm_right_ee_base_link
+    action_interfaces:
+      - openarm.arm.move_relative
+    physical_limits:
+      min_battery_percent: 0
+    environment_assumptions:
+      execution_mode: SIMULATION
+      planning_frame: world
+
+incompatible: []

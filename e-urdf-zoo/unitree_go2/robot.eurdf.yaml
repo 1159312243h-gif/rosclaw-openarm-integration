@@ -1,0 +1,378 @@
+robot_id: unitree_go2
+name: Go2
+vendor: Unitree
+version: "1.1"
+description: >
+  Agile quadruped robot with 12-DOF, high-torque actuators, LIDAR,
+  depth cameras, and onboard computing. Capable of walking, trotting,
+  bounding, and stair climbing.
+
+dof: 12
+links:
+  - name: base
+    type: base
+    mass: 8.0
+    mesh: "assets/base.dae"
+  - name: trunk
+    type: link
+    mass: 6.0
+    mesh: "assets/trunk.dae"
+  - name: fr_hip
+    type: link
+    mass: 0.5
+    description: "Front right hip"
+  - name: fr_thigh
+    type: link
+    mass: 1.0
+    description: "Front right thigh"
+  - name: fr_calf
+    type: link
+    mass: 0.8
+    description: "Front right calf"
+  - name: fr_foot
+    type: end_effector
+    mass: 0.1
+    description: "Front right foot"
+  - name: fl_hip
+    type: link
+    mass: 0.5
+    description: "Front left hip"
+  - name: fl_thigh
+    type: link
+    mass: 1.0
+    description: "Front left thigh"
+  - name: fl_calf
+    type: link
+    mass: 0.8
+    description: "Front left calf"
+  - name: fl_foot
+    type: end_effector
+    mass: 0.1
+    description: "Front left foot"
+  - name: rr_hip
+    type: link
+    mass: 0.5
+    description: "Rear right hip"
+  - name: rr_thigh
+    type: link
+    mass: 1.0
+    description: "Rear right thigh"
+  - name: rr_calf
+    type: link
+    mass: 0.8
+    description: "Rear right calf"
+  - name: rr_foot
+    type: end_effector
+    mass: 0.1
+    description: "Rear right foot"
+  - name: rl_hip
+    type: link
+    mass: 0.5
+    description: "Rear left hip"
+  - name: rl_thigh
+    type: link
+    mass: 1.0
+    description: "Rear left thigh"
+  - name: rl_calf
+    type: link
+    mass: 0.8
+    description: "Rear left calf"
+  - name: rl_foot
+    type: end_effector
+    mass: 0.1
+    description: "Rear left foot"
+
+joints:
+  - name: fr_hip_joint
+    type: revolute
+    parent: trunk
+    child: fr_hip
+    axis: [1, 0, 0]
+    limits: {lower: -0.8, upper: 0.8, velocity: 20.0, effort: 23.7}
+  - name: fr_thigh_joint
+    type: revolute
+    parent: fr_hip
+    child: fr_thigh
+    axis: [0, 1, 0]
+    limits: {lower: -1.05, upper: 4.19, velocity: 20.0, effort: 23.7}
+  - name: fr_calf_joint
+    type: revolute
+    parent: fr_thigh
+    child: fr_calf
+    axis: [0, 1, 0]
+    limits: {lower: -2.7, upper: -0.92, velocity: 20.0, effort: 45.0}
+  - name: fl_hip_joint
+    type: revolute
+    parent: trunk
+    child: fl_hip
+    axis: [1, 0, 0]
+    limits: {lower: -0.8, upper: 0.8, velocity: 20.0, effort: 23.7}
+  - name: fl_thigh_joint
+    type: revolute
+    parent: fl_hip
+    child: fl_thigh
+    axis: [0, 1, 0]
+    limits: {lower: -1.05, upper: 4.19, velocity: 20.0, effort: 23.7}
+  - name: fl_calf_joint
+    type: revolute
+    parent: fl_thigh
+    child: fl_calf
+    axis: [0, 1, 0]
+    limits: {lower: -2.7, upper: -0.92, velocity: 20.0, effort: 45.0}
+  - name: rr_hip_joint
+    type: revolute
+    parent: trunk
+    child: rr_hip
+    axis: [1, 0, 0]
+    limits: {lower: -0.8, upper: 0.8, velocity: 20.0, effort: 23.7}
+  - name: rr_thigh_joint
+    type: revolute
+    parent: rr_hip
+    child: rr_thigh
+    axis: [0, 1, 0]
+    limits: {lower: -1.05, upper: 4.19, velocity: 20.0, effort: 23.7}
+  - name: rr_calf_joint
+    type: revolute
+    parent: rr_thigh
+    child: rr_calf
+    axis: [0, 1, 0]
+    limits: {lower: -2.7, upper: -0.92, velocity: 20.0, effort: 45.0}
+  - name: rl_hip_joint
+    type: revolute
+    parent: trunk
+    child: rl_hip
+    axis: [1, 0, 0]
+    limits: {lower: -0.8, upper: 0.8, velocity: 20.0, effort: 23.7}
+  - name: rl_thigh_joint
+    type: revolute
+    parent: rl_hip
+    child: rl_thigh
+    axis: [0, 1, 0]
+    limits: {lower: -1.05, upper: 4.19, velocity: 20.0, effort: 23.7}
+  - name: rl_calf_joint
+    type: revolute
+    parent: rl_thigh
+    child: rl_calf
+    axis: [0, 1, 0]
+    limits: {lower: -2.7, upper: -0.92, velocity: 20.0, effort: 45.0}
+
+sensors:
+  - name: lidar
+    type: lidar
+    parent_link: trunk
+    range: [0.1, 30.0]
+    resolution: 0.25
+    frequency: 10
+    description: "360-degree LIDAR"
+  - name: front_camera
+    type: camera
+    parent_link: trunk
+    resolution: [1920, 1080]
+    fov: 120.0
+    near: 0.05
+    far: 50.0
+    fps: 30
+  - name: depth_camera
+    type: depth_camera
+    parent_link: trunk
+    resolution: [640, 480]
+    fov: 87.0
+    near: 0.1
+    far: 10.0
+    fps: 30
+  - name: trunk_imu
+    type: imu
+    parent_link: trunk
+    noise_std: {accel: 0.01, gyro: 0.001}
+  - name: foot_force_sensors
+    type: force
+    parent_link: "*foot"
+    range: [0, 500]
+    resolution: 0.1
+
+actuators:
+  - name: fr_hip_actuator
+    type: electric_motor
+    joint: fr_hip_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: fr_thigh_actuator
+    type: electric_motor
+    joint: fr_thigh_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: fr_calf_actuator
+    type: electric_motor
+    joint: fr_calf_joint
+    max_current: 20.0
+    gear_ratio: 16.0
+    control_mode: [position, velocity, torque]
+  - name: fl_hip_actuator
+    type: electric_motor
+    joint: fl_hip_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: fl_thigh_actuator
+    type: electric_motor
+    joint: fl_thigh_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: fl_calf_actuator
+    type: electric_motor
+    joint: fl_calf_joint
+    max_current: 20.0
+    gear_ratio: 16.0
+    control_mode: [position, velocity, torque]
+  - name: rr_hip_actuator
+    type: electric_motor
+    joint: rr_hip_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: rr_thigh_actuator
+    type: electric_motor
+    joint: rr_thigh_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: rr_calf_actuator
+    type: electric_motor
+    joint: rr_calf_joint
+    max_current: 20.0
+    gear_ratio: 16.0
+    control_mode: [position, velocity, torque]
+  - name: rl_hip_actuator
+    type: electric_motor
+    joint: rl_hip_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: rl_thigh_actuator
+    type: electric_motor
+    joint: rl_thigh_joint
+    max_current: 15.0
+    gear_ratio: 7.75
+    control_mode: [position, velocity, torque]
+  - name: rl_calf_actuator
+    type: electric_motor
+    joint: rl_calf_joint
+    max_current: 20.0
+    gear_ratio: 16.0
+    control_mode: [position, velocity, torque]
+
+safety_limits:
+  joint_limits:
+    fr_hip_joint: {lower: -0.8, upper: 0.8}
+    fr_thigh_joint: {lower: -1.05, upper: 4.19}
+    fr_calf_joint: {lower: -2.7, upper: -0.92}
+    fl_hip_joint: {lower: -0.8, upper: 0.8}
+    fl_thigh_joint: {lower: -1.05, upper: 4.19}
+    fl_calf_joint: {lower: -2.7, upper: -0.92}
+    rr_hip_joint: {lower: -0.8, upper: 0.8}
+    rr_thigh_joint: {lower: -1.05, upper: 4.19}
+    rr_calf_joint: {lower: -2.7, upper: -0.92}
+    rl_hip_joint: {lower: -0.8, upper: 0.8}
+    rl_thigh_joint: {lower: -1.05, upper: 4.19}
+    rl_calf_joint: {lower: -2.7, upper: -0.92}
+  velocity_limits:
+    fr_hip_joint: 20.0
+    fr_thigh_joint: 20.0
+    fr_calf_joint: 20.0
+    fl_hip_joint: 20.0
+    fl_thigh_joint: 20.0
+    fl_calf_joint: 20.0
+    rr_hip_joint: 20.0
+    rr_thigh_joint: 20.0
+    rr_calf_joint: 20.0
+    rl_hip_joint: 20.0
+    rl_thigh_joint: 20.0
+    rl_calf_joint: 20.0
+  force_limits:
+    max_joint_effort: 45.0
+    max_foot_force: 500.0
+  workspace: {type: bounding_box, center: [0, 0, 0.3], dimensions: [1.0, 0.5, 0.6]}
+  power_limits: {max_power: 500.0, max_current_total: 200.0}
+
+capabilities:
+  - name: walk
+    type: locomotion
+    skill_type: programmed
+    parameters:
+      direction: {type: str, enum: [forward, backward, left, right]}
+      speed: {type: float, default: 0.5, unit: m/s}
+      duration: {type: float, unit: s}
+    constraints: {max_slope: 30.0, max_step_height: 0.15}
+  - name: trot
+    type: locomotion
+    skill_type: programmed
+    parameters:
+      speed: {type: float, default: 1.0, unit: m/s}
+      duration: {type: float, unit: s}
+    constraints: {max_speed: 3.5, terrain: flat_or_rough}
+  - name: stand_up
+    type: locomotion
+    skill_type: programmed
+    parameters:
+      height: {type: float, default: 0.35, unit: m}
+  - name: stair_climb
+    type: locomotion
+    skill_type: composed
+    parameters:
+      stair_count: {type: int}
+      step_height: {type: float, unit: m}
+      step_depth: {type: float, unit: m}
+    constraints: {max_step_height: 0.18, max_slope: 40.0}
+  - name: navigation
+    type: perception
+    skill_type: programmed
+    parameters:
+      target_pose: {type: pose}
+      obstacle_avoidance: {type: bool, default: true}
+    sensors_used: [lidar, depth_camera]
+
+simulation_backends:
+  mujoco:
+    model_file: robot.mjcf.xml
+    timestep: 0.001
+    integrator: implicitfast
+    solver: newton
+    iterations: 50
+    ls_iterations: 10
+    gravity: [0, 0, -9.81]
+    contact: {friction: [1.0, 0.005, 0.0001], solref: [0.02, 1.0], solimp: [0.9, 0.95, 0.001]}
+  isaac:
+    model_file: robot.urdf
+    stage_units: meters
+    physics_dt: 0.00833
+    rendering_dt: 0.01667
+    gpu_physics: true
+  gazebo:
+    model_file: robot.urdf
+    physics_engine: ode
+    max_step_size: 0.001
+    real_time_factor: 1.0
+
+semantic_tags:
+  - quadruped
+  - legged_robot
+  - 12dof
+  - locomotion
+  - outdoor
+  - agile
+  - inspection
+  - research
+  - chinese
+
+metadata:
+  urdf_version: "1.0"
+  ros2_package: unitree_go2_description
+  ros2_controllers: [joint_trajectory_controller, forward_command_controller]
+  default_controller: forward_command_controller
+  payload_capacity: 3.0
+  battery_capacity: "9000mAh"
+  max_speed: 3.5
+  certification: [CE, FCC]

@@ -1,0 +1,32 @@
+benchmark_version: "1.0"
+robot_id: openarm_dual_mujoco_01
+
+kinematic_benchmarks:
+  - name: bounded_relative_motion
+    description: Verify a world-frame Cartesian translation of at most 20 mm.
+    target_position_error_m: 0.0005
+
+dynamic_benchmarks: []
+
+simulation_benchmarks:
+  mujoco:
+    - name: relative_motion_receipt
+      target: TASK_VERIFIED
+      execution_mode: SIMULATION
+
+task_benchmarks:
+  - name: right_arm_up_2mm
+    capability_id: openarm.arm.move_relative
+    arguments:
+      arm: right
+      reference_frame: world
+      translation: {x: 0.0, y: 0.0, z: 0.002}
+    expected_final_state: COMPLETED
+
+safety_benchmarks:
+  - name: reject_translation_over_20mm
+    expected: blocked
+
+baseline_hardware:
+  execution_domain: simulation
+  real_robot_validated: false

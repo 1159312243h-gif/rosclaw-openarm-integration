@@ -1,0 +1,10 @@
+--- /home/hkz/rosclaw_openarm_integration/migration_reference/applied_patches/rosclaw_motion.package.xml.before_ament_python_fix	2026-08-26 11:07:17.464341030 +0800
++++ /home/hkz/rosclaw_openarm_integration/ros_ws/src/rosclaw_motion/package.xml	2026-08-26 11:07:17.473340986 +0800
+@@ -7,7 +7,6 @@
+   <maintainer email="hkz@example.com">hkz</maintainer>
+   <license>Apache-2.0</license>
+ 
+-  <buildtool_depend>ament_python</buildtool_depend>
+ 
+   <exec_depend>action_msgs</exec_depend>
+   <exec_depend>geometry_msgs</exec_depend>

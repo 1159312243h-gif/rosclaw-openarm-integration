@@ -1,0 +1,26 @@
+{
+  "schema_version": "rosclaw.openarm.acceptance.summary.v1",
+  "recorded_at": "2026-08-06",
+  "source": "official ROSClaw 1.0.1 VM acceptance output",
+  "scope": "SIMULATION",
+  "body_id": "openarm_dual_mujoco_01",
+  "capability_id": "openarm.arm.move_relative",
+  "action_id": "action_7b8e9c0a-1234-5678-9abc-def012345678",
+  "result": {
+    "final_state": "COMPLETED",
+    "evidence_level": "TASK_VERIFIED",
+    "acknowledgement_stage": "TASK_VERIFIED",
+    "verification_passed": true,
+    "backend": "mujoco",
+    "physics_executed": true,
+    "final_error_m": 0.00047662206690806525,
+    "receipt_integrity_verified": true,
+    "valid_for_current_moveit_contract": false,
+    "superseded_reason": "Historical direct-MuJoCo evidence predates the mandatory MoveIt backend"
+  },
+  "model_hashes": {
+    "robot.urdf": "1ec020a66635cb5687ec57a51c87b8ed3c868d8b447370462e31c3c84e7d22a7",
+    "robot.mjcf.xml": "788efe1683b6970ce61f2b68a44c223386014c73bb7e929cad4e14fea0e722c1"
+  },
+  "real_robot_accessed": false
+}

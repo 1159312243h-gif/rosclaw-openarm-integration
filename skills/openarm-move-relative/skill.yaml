@@ -1,0 +1,95 @@
+schema_version: "rosclaw.skill.v1"
+kind: "Skill"
+
+metadata:
+  name: "openarm-move-relative"
+  display_name: "OpenArm Bounded Relative Motion"
+  namespace: "openarm"
+  version: "0.1.0"
+  stage: "draft"
+  category: "manipulation"
+  tags:
+    - openarm_dual_mujoco_01
+    - physical-ai
+    - moveit2
+    - mujoco
+  description: "Move one OpenArm end effector through the official ROSClaw Runtime, mandatory MoveIt 2 planning and MuJoCo execution path."
+  license: "MIT"
+  authors:
+    - name: "OpenArm ROSClaw Integration"
+      url: null
+
+identity:
+  skill_id: "openarm/openarm-move-relative"
+  package_name: "openarm/openarm-move-relative"
+  canonical_uri: "rosclaw://skills/openarm/openarm-move-relative"
+  git_repo: null
+  git_ref: null
+  source_subdir: "skills/openarm-move-relative"
+  git_commit: null
+
+task:
+  intent: "move_openarm_end_effector_relative"
+  natural_language:
+    en: "Move the selected OpenArm end effector by a bounded translation in the world frame."
+    zh: "让指定的 OpenArm 机械臂末端在世界坐标系中执行有界相对平移。"
+  input_contract:
+    required:
+      - robot_state
+      - arm
+      - translation
+    optional:
+      - velocity_scale
+      - acceleration_scale
+  output_contract:
+    success_condition:
+      - "receipt.final_state == COMPLETED"
+      - "receipt.evidence_level == TASK_VERIFIED"
+      - "receipt.verification_result.passed == true"
+      - "receipt.simulation_result.backend == mujoco_moveit"
+      - "receipt.simulation_result.direct_mujoco_fallback == false"
+      - "receipt.verification_result.moveit_planning_observed == true"
+      - "receipt.verification_result.trajectory_execution_observed == true"
+      - "receipt.verification_result.final_pose_verification_observed == true"
+      - "receipt.verification_result.final_pose_reported == true"
+    artifacts:
+      - trace
+      - runtime_events
+
+execution:
+  entrypoint:
+    type: "behavior_tree"
+    file: "behavior_tree.xml"
+  runtime_adapter: "rosclaw.runtime.skill_executor"
+  policy:
+    type: "programmed"
+    config: "policies/policy.yaml"
+  prompts:
+    planner: "prompts/planner.md"
+    executor: "prompts/executor.md"
+    verifier: "prompts/verifier.md"
+    recovery: "prompts/recovery.md"
+    safety: "prompts/safety.md"
+
+compatibility:
+  eurdf: "e-urdf-compat.yaml"
+  providers: "providers.yaml"
+  safety: "safety.yaml"
+
+evaluation:
+  dojo: "dojo.yaml"
+  darwin: "darwin_eval.yaml"
+  tests: "tests/"
+
+lineage:
+  file: "lineage.yaml"
+
+evidence:
+  directory: "evidence/"
+  latest_eval_report: null
+
+status:
+  promotion_state: "draft"
+  last_eval_passed: false
+  safe_to_run_on_real_robot: false
+  recommended_runtime_mode: "sandbox_first"
